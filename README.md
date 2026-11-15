@@ -102,7 +102,7 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Input | Notes |
 |---|---|
 | Rooted tree of living species | Fixed topology |
-| Branch lengths and their standard errors | For example ML branch lengths on the fixed tree, with bootstrap standard errors |
+| Branch lengths and their standard errors | ML branch lengths on the fixed tree from a **partitioned** model, with bootstrap standard errors (see below) |
 | Fossil list | Name, minimum and maximum age |
 | Clade constraints | Which fossils belong in which clades |
 | Crown or stem rules (optional) | Fossils that must sit inside a crown, or on its stem only (see below) |
@@ -110,6 +110,8 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Root age prior | `uniform MIN MAX`, `soft MIN MAX SD P` (soft bounds) or `normal MEAN SD` |
 | Clock model | Chosen by fitting the five clocks on your phylogram (highly recommended; [Choosing the clock](#choosing-the-clock)), then set with `--clock` |
 | Starting tree (optional) | **Built automatically** by `scripts/ffbd_convert.py`. Give your own `initial.nwk` only if you want a particular start |
+
+**Partition the branch lengths.** Fit them by gene and codon position, or with a scheme merged by ModelFinder (IQ-TREE `-p partitions.nex -m MFP+MERGE`). A single model for all sites gets short branches wrong: young nodes come out too old relative to old ones, and their intervals miss the true age more often.
 
 These go in one text file. `examples/example_input.txt` shows every section: the settings, then `tips`, `initial_tree`, `constraints`, `extant_nodes`, `branches` and `terms`. If your inputs are already in RevBayes-style files, `scripts/ffbd_convert.py` builds this file for you.
 
@@ -326,7 +328,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 
 - **The dates are true.** The true ages of real clades are unknown. More genes and better clocks reduce error, but model error remains.
 - **The clock is right.** The clock and the genes behind the branch lengths can move dates more than the shortcut does (question 5), so they deserve the same care as fossil choice.
-- **Very young nodes are accurate.** Nodes under about 5 Ma tend to come out about 1 Myr too old. This comes from the model and priors, and full-DNA FBD shares it.
+- **Very young nodes are accurate.** Nodes under about 5 Ma tend to come out about 1 Myr too old. Part of this comes from the model and priors, and full-DNA FBD shares it; the rest comes from unpartitioned branch lengths and mostly goes away with partitioning.
 - **The topology is right.** Each run dates one tree of living species. Topological uncertainty is covered by dating several trees (see Tree uncertainty, above).
 
 ### Why `ffbd` may do better than full-DNA FBD on real data
