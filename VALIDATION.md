@@ -1,6 +1,6 @@
 # Validation of ffbd: details
 
-Status as of 13 November 2026. This file holds the numbers behind the [README Validation section](README.md#validation), which gives the plain-language questions, approach and references. Tests are numbered the same way in both. "RevBayes" means RevBayes 1.3.2 and "MrBayes" means MrBayes 3.2.7. Result files and figures are in `validation/`; the scripts are in `scripts/`.
+This file holds the numbers behind the [README Validation section](README.md#validation), which gives the plain-language questions, approach and references. Tests are numbered the same way in both. "RevBayes" means RevBayes 1.3.2 and "MrBayes" means MrBayes 3.2.7. Result files and figures are in `validation/`; the scripts are in `scripts/`.
 
 **Data labels.** `ffbd` never reads DNA. Its data are a phylogram: branch lengths of the fixed living-species tree, in substitutions per site, with standard errors.
 
