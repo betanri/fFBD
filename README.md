@@ -177,7 +177,7 @@ rate_shifts 66 201.3
 
 ## Validation
 
-Status as of 13 November 2026. All numbers, per-test details and result files are in [VALIDATION.md](VALIDATION.md) and `validation/`, with the same test numbers as here.
+All numbers, per-test details and result files are in [VALIDATION.md](VALIDATION.md) and `validation/`, with the same test numbers as here.
 
 `ffbd` is new code, and it replaces the DNA with a phylogram. Both need to earn trust. The validation follows the standard recipe for Bayesian software (Cook et al. 2006; Talts et al. 2018; Mendes et al. 2025) and for FBD simulation studies (Heath et al. 2014; Barido-Sottani et al. 2019). It is organized as six questions. For each one: why it matters, how it was tested, and the answer.
 
@@ -299,7 +299,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 
 ![Phylograms against 23-gene DNA](validation/phylogram_vs_dna_controlled.png)
 
-*Test 5a.* Each dot is a node. Vertical: how far `ffbd` is from the 23-gene DNA analysis, in %. Grey is the noise between DNA chains, blue the 23-gene phylogram, orange the all-gene phylogram and green the pruned larger-tree phylogram. Blue sits with grey; orange and green sit lower (younger).
+*Test 5a. Does `ffbd` give the same dates as a full DNA analysis, and what changes them?* Each dot is one node of two fish clades. The x-axis is its age in the 23-gene DNA analysis (RevBayes); the y-axis is how far another run's age is from it, in % (0 = same age, below 0 = younger). Every run has the same tree, fossils and priors; only the input changes. **Grey:** a second set of DNA chains, i.e. the noise you get just by rerunning the DNA analysis. **Blue:** `ffbd` given a phylogram from the same 23 genes. It sits with grey (median 1.0 and 1.5%), so replacing the DNA with a phylogram costs nothing. **Orange and green:** `ffbd` given phylograms from far more data (all ~1,100 genes, or a larger genome-scale tree pruned to the clade). Their nodes are younger, by 5 to 9% at the median and most on the youngest nodes, because more genes give different branch lengths, not because `ffbd` differs from DNA. Test 5e checks against simulated true ages which answer is closer to the truth.
 
 ### 6. Does it work on large trees?
 
