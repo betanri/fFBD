@@ -63,7 +63,7 @@ if all(three.values()):
         ax = axes[0][j]
         grid(ax)
         ax.axhline(0, color=GREY, lw=1, ls='--', zorder=1)
-        for p, lab, c, z in [('rb', 'RevBayes 1.3.2', ORANGE, 3), ('ffbd', 'ffbd', BLUE, 4)]:
+        for p, lab, c, z in [('rb', 'RevBayes 1.3.2', ORANGE, 3), ('ffbd', 'fFBD', BLUE, 4)]:
             d = [100 * (v[p] - v['mb']) / v['mb'] for v in node.values()]
             ax.scatter(mb, d, s=36, color=c, edgecolor='white', lw=1.2, zorder=z,
                        label=f'{lab}: median |diff| {st.median(abs(x) for x in d):.1f}%, largest {max(abs(x) for x in d):.0f}%')
@@ -80,14 +80,14 @@ if all(three.values()):
                 sa.setdefault(x['program'], {})[int(x['node'].split('=')[1])] = float(x['median'])
         ks = [k for k in sorted(set().union(*sa.values())) if max(sa[p].get(k, 0) for p in sa) >= 0.001]
         w = 0.27
-        for i, (p, lab, c) in enumerate([('ffbd', 'ffbd', BLUE), ('mb', 'MrBayes', AQUA), ('rb', 'RevBayes', ORANGE)]):
+        for i, (p, lab, c) in enumerate([('ffbd', 'fFBD', BLUE), ('mb', 'MrBayes', AQUA), ('rb', 'RevBayes', ORANGE)]):
             ax.bar([k + (i - 1) * w for k in ks], [sa[p].get(k, 0) for k in ks], width=w - 0.03, color=c, label=lab)
         ax.set_title(f'{NAMES[S]}: number of sampled ancestors', loc='left', fontsize=10, color=INK)
         ax.set_xlabel('Sampled ancestors in a posterior tree')
         ax.set_ylabel('Share of posterior samples')
         ax.set_xticks(ks)
         ax.legend(loc='upper left')
-    fig.suptitle('Test 3a. Same fixed tree, fossils and fixed rates, no data: ffbd and MrBayes agree, RevBayes differs',
+    fig.suptitle('Test 3a. Same fixed tree, fossils and fixed rates, no data: fFBD and MrBayes agree, RevBayes differs',
                  x=0.01, ha='left', fontsize=10.5, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(f'{O}/three_programs_no_data.png', dpi=160)
@@ -115,7 +115,7 @@ if all(ctrl.values()):
         ax.set_xlabel('Node age, 23-gene full-DNA FBD (Ma, log scale)')
         ax.set_ylabel('Difference from full DNA (%)')
         ax.legend(loc='upper left', bbox_to_anchor=(0, -0.16), fontsize=8)
-    fig.suptitle('Test 5a. Same tree, fossils and priors; only the phylogram given to ffbd changes. '
+    fig.suptitle('Test 5a. Same tree, fossils and priors; only the phylogram given to fFBD changes. '
                  'Reference: RevBayes full-DNA FBD, 23 genes', x=0.01, ha='left', fontsize=10, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(f'{O}/phylogram_vs_dna_controlled.png', dpi=160)

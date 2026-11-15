@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Branch lengths in time (Myr): full-DNA FBD against Fast FBD, one panel per data set.
+"""Branch lengths in time (Myr): full-DNA FBD against fFBD, one panel per data set.
 Each side is summarized as an extant-only time tree (fossils pruned, conditional median node ages; FBD/TIME_TREES/extant_time_tree.py).
 A branch is compared when both trees contain the same child clade with the same parent clade; its length is parent age minus child age.
 Top row: node ages (linear). Bottom row: branch lengths (log). --ages-only: node ages only.
@@ -100,8 +100,8 @@ with open(tsv, 'w') as fh:
         ax.plot([0, hi], [0, hi], ls='--', lw=1, color='#888888', zorder=1)
         ax.scatter(x, y, s=10 if len(x) > 200 else 22, alpha=0.55 if len(x) > 200 else 0.8, color='#2a78d6', edgecolors='none', zorder=2)
         ax.set_xlim(0, hi); ax.set_ylim(0, hi)
-        ax.set_title(f'{name}: node ages\n{len(k)} nodes, r = {r:.3f}, Fast {ms:+.1f} Myr on average', fontsize=10)
-        ax.set_xlabel('Full FBD node age (Ma)'); ax.set_ylabel('Fast FBD (ffbd) node age (Ma)')
+        ax.set_title(f'{name}: node ages\n{len(k)} nodes, r = {r:.3f}, fFBD {ms:+.1f} Myr on average', fontsize=10)
+        ax.set_xlabel('Full FBD node age (Ma)'); ax.set_ylabel('fFBD node age (Ma)')
         print(name, 'node ages', len(k), 'r', round(r, 4), 'median |%|', round(st.median(pc), 2), 'mean signed', round(ms, 2), flush=True)
         if AGES_ONLY:
             axes[0][j].grid(True, color='#e6e6e6', lw=0.6); axes[0][j].set_axisbelow(True)
@@ -116,7 +116,7 @@ with open(tsv, 'w') as fh:
         ax.scatter(x, y, s=10 if len(x) > 200 else 22, alpha=0.55 if len(x) > 200 else 0.8, color='#2a78d6', edgecolors='none', zorder=2)
         ax.set_xscale('log'); ax.set_yscale('log'); ax.set_xlim(lo, hi); ax.set_ylim(lo, hi)
         ax.set_title(f'{name}: branch lengths\n{len(keys)} branches, r(log) = {rl:.3f}, median diff {st.median(pc):.1f}%', fontsize=10)
-        ax.set_xlabel('Full FBD branch length (Myr)'); ax.set_ylabel('Fast FBD (ffbd) branch length (Myr)')
+        ax.set_xlabel('Full FBD branch length (Myr)'); ax.set_ylabel('fFBD branch length (Myr)')
         print(name, 'branches', len(keys), 'r(log)', round(rl, 4), 'median |%|', round(st.median(pc), 2), flush=True)
         for row in (0, 1):
             axes[row][j].grid(True, which='major', color='#e6e6e6', lw=0.6); axes[row][j].set_axisbelow(True)
