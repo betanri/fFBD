@@ -39,8 +39,8 @@ On one CPU core it runs about **2.6 million MCMC proposals per second**, with no
 You need a C++17 compiler and nothing else.
 
 ```bash
-git clone https://github.com/betanri/fast_FBD.git
-cd fast_FBD
+git clone https://github.com/betanri/fFBD.git
+cd fFBD
 make
 ```
 

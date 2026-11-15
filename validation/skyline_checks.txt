@@ -88,7 +88,7 @@ becomes a Metropolis-Hastings step when shifts are present.
    density (O(N) each). Local moves cost the same as before. An incremental density for the rate moves (only intervals at or older than the
    one changed) could reduce this; not done.
 
-Files: ffbd_sky.cpp (= new ffbd.cpp; also fast_FBD_release/ffbd.cpp, uncommitted), ffbd_sim_sky.cpp (= new ffbd_sim.cpp; also release),
+Files: ffbd_sky.cpp (= new ffbd.cpp; also the release ffbd.cpp, uncommitted), ffbd_sim_sky.cpp (= new ffbd_sim.cpp; also release),
 previous versions kept as ffbd_pre_sky.cpp and ffbd_sim_pre_sky.cpp; scripts/sky_density_check.py, scripts/sbc_sky.py. ffbd_convert.py unchanged.
 
 ---- SBC per-quantity tables (sbc_sky.py analyze) ----
