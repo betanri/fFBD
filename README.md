@@ -102,7 +102,7 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Input | Notes |
 |---|---|
 | Rooted tree of living species | Fixed topology |
-| Branch lengths and their standard errors | For example ML branch lengths on the fixed tree, with bootstrap standard errors |
+| Branch lengths and their standard errors | ML branch lengths on the fixed tree from a **partitioned** model, with bootstrap standard errors (see below) |
 | Fossil list | Name, minimum and maximum age |
 | Clade constraints | Which fossils belong in which clades |
 | Crown or stem rules (optional) | Fossils that must sit inside a crown, or on its stem only (see below) |
@@ -110,6 +110,8 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Root age prior | `uniform MIN MAX`, `soft MIN MAX SD P` (soft bounds) or `normal MEAN SD` |
 | Clock model | Chosen by fitting the five clocks on your phylogram (highly recommended; [Choosing the clock](#choosing-the-clock)), then set with `--clock` |
 | Starting tree (optional) | **Built automatically** by `scripts/ffbd_convert.py`. Give your own `initial.nwk` only if you want a particular start |
+
+**Partition the branch lengths.** Fit them by gene and codon position, or with a scheme merged by ModelFinder (IQ-TREE `-p partitions.nex -m MFP+MERGE`). A single model for all sites gets short branches wrong: young nodes come out too old relative to old ones, and their intervals miss the true age more often (test 5f).
 
 These go in one text file. `examples/example_input.txt` shows every section: the settings, then `tips`, `initial_tree`, `constraints`, `extant_nodes`, `branches` and `terms`. If your inputs are already in RevBayes-style files, `scripts/ffbd_convert.py` builds this file for you.
 
@@ -273,6 +275,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
     - with the exponential clock, the program gives byte-identical output to the previous version.
 - **5d. Sampling fraction.** *Phylogram.* `ffbd` fixes rho, the fraction of living species in the tree. A 1,184-species phylogram (pruned from a genome-scale phylogram of a larger tree) with 1,588 fossils was dated at rho = 3.25, 10, 15, 25 and 50%.
 - **5e. More genes, known truth.** *Phylograms from simulated DNA.* Gene sets were simulated on the 100 trees of test 4b. The genes differ the way real genes do: each has its own rate, base composition and rate variation, and a few are fast, mitochondrial-like genes. There are two sets: 23 genes (about 18,000 sites), and 1,000 genes (about 500,000 sites) that include the 23. Each set was analyzed like the real clades: concatenated, with ML branch lengths on the true tree.
+- **5f. Partitioned branch lengths, known truth.** *Phylograms from simulated DNA.* The same trees, with genes that also differ by codon position. Branch lengths were fitted with one model for all sites, by gene, by codon position, by gene x codon position, and with a ModelFinder-merged scheme.
 
 **Answer.**
 
@@ -296,6 +299,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
     - **Cross-check.** With node ages fixed at the MrBayes estimates, or estimated under fossil minimum ages, the relaxed clocks again beat exponential and strict. There the autocorrelated clock leads for Protacanthopterygii, with lognormal within 2.5 log units. The remaining free-age runs will be added when done.
 - **5d. Rho matters less.** Raising rho from 3.25 to 50% makes crown ages younger: under 1% at the root (held by its prior) and up to 8% on younger crowns. At rho = 10%, no crown moves more than 2%.
 - **5e. More genes are more accurate, modestly.** With 1,000 genes, node ages are closer to the truth on 63% of nodes. The median error drops from 3.55 to 3.39 Myr (3.13 with perfect branch lengths), and 95% coverage rises from 89.5 to 90.7% (93.1% with perfect branch lengths). The gain is largest on nodes under 5 Ma. A 23-gene phylogram gives the same answer as 23-gene DNA (tests 4a and 5a), so this compares full-DNA FBD on the genes it can afford with `ffbd` on genome-scale data.
+- **5f. Partition the branch lengths.** One model for all sites makes short branches too long, so young nodes come out too old: under 5 Ma, coverage 0.79 and +106% bias. Partitioning by gene x codon position, or the ModelFinder scheme, gives 0.90 and +67%, close to perfect branch lengths (0.93 and +60%). By codon alone or by gene alone helps much less. Older nodes hardly change.
 
 ![Phylograms against 23-gene DNA](validation/phylogram_vs_dna_controlled.png)
 
@@ -326,7 +330,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 
 - **The dates are true.** The true ages of real clades are unknown. More genes and better clocks reduce error, but model error remains.
 - **The clock is right.** The clock and the genes behind the branch lengths can move dates more than the shortcut does (question 5), so they deserve the same care as fossil choice.
-- **Very young nodes are accurate.** Nodes under about 5 Ma tend to come out about 1 Myr too old. This comes from the model and priors, and full-DNA FBD shares it.
+- **Very young nodes are accurate.** Nodes under about 5 Ma tend to come out about 1 Myr too old. Part of this comes from the model and priors, and full-DNA FBD shares it; the rest comes from unpartitioned branch lengths and mostly goes away with partitioning (test 5f).
 - **The topology is right.** Each run dates one tree of living species. Topological uncertainty is covered by dating several trees (see Tree uncertainty, above).
 
 ### Why `ffbd` may do better than full-DNA FBD on real data
@@ -363,6 +367,7 @@ Full-DNA FBD is slow, and that forces two compromises in practice. `ffbd` remove
 | 5b | `make_mb_dna.py`, `compare_mbdna.py` | `mrbayes_dna_A06_A12.txt` |
 | 5c | `clock_ss.py` (DNA, RevBayes); `ffbd --clock C --ss K` (phylogram); `clock_density_check.py` | `clock_checks.txt`, `clock_fit_results.txt` |
 | 5e | `sim_genes.py`, `sim_genes_summary.py` | `sim_genes_100reps.txt` |
+| 5f | `sim_codons.py`, `young_fix_summary.py`, `codon_test_summary.py` | `young_fix_50reps.txt`, `codon_test_50reps.txt` |
 | 6b | `examples/example_crown_stem.txt` | `crown_stem_test_11seeds.txt`, `regression_previous_release.txt` |
 | 6d | `ffbd_convert.py --auto-start` | `auto_start_check.txt` |
 | Figures | `validation_figures.py` | `validation/*.png` |

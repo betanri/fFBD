@@ -1,0 +1,17 @@
+evaluation replicates 51-100 with all arms: 50; nodes per arm: 3393
+arm              cov95 median rel err median |err| Myr median width Myr
+exact            0.930          12.3%             3.19            21.27   model-consistent data (b ~ N(true, sqrt(b/2000)))
+cod_unpart       0.879          21.5%             3.72            22.16   23 codon genes, one GTR+G4 for all sites
+cod_gene         0.900          17.2%             3.47            21.71   23 codon genes, partitioned by gene (23)
+cod_codon        0.882          20.4%             3.65            22.06   23 codon genes, partitioned by codon position (3)
+cod_genecodon    0.905          15.6%             3.35            21.60   23 codon genes, gene x codon position (69, true scheme)
+cod_mfp          0.909          15.1%             3.33            21.60   23 codon genes, gene x codon merged by ModelFinder (MFP+MERGE)
+
+by true node age (Ma): coverage / median relative error / median absolute error (Myr) / median width (Myr)
+arm                                  0-5                     5-10                    10-20                    20-40                    40-60                   60-100
+exact               0.926/+60%/1.24/10.5     0.932/+20%/2.75/16.4     0.921/+14%/3.89/21.0     0.932/+10%/4.96/26.6      0.919/+3%/5.71/31.8      0.969/+1%/4.95/29.0
+cod_unpart         0.794/+106%/1.89/11.9     0.890/+36%/3.06/17.3     0.891/+23%/4.37/21.9     0.908/+13%/5.62/27.5      0.910/+6%/6.18/32.5      0.946/+1%/4.83/29.0
+cod_gene            0.872/+79%/1.51/11.2     0.903/+28%/2.75/16.8     0.896/+19%/4.18/21.6     0.915/+12%/5.23/27.2      0.907/+6%/6.14/32.4      0.942/+1%/5.01/28.7
+cod_codon          0.811/+100%/1.77/11.8     0.890/+34%/2.94/17.2     0.893/+22%/4.33/21.8     0.908/+13%/5.49/27.3      0.907/+6%/6.09/32.7      0.938/+1%/5.06/29.0
+cod_genecodon       0.889/+68%/1.36/10.9     0.908/+25%/2.72/16.6     0.904/+17%/4.10/21.4     0.911/+11%/5.23/27.1      0.910/+6%/6.19/32.2      0.930/+1%/4.97/29.2
+cod_mfp             0.896/+67%/1.38/10.9     0.912/+24%/2.69/16.6     0.905/+17%/4.08/21.3     0.914/+11%/5.19/27.1      0.910/+6%/6.16/32.2      0.938/+1%/5.10/29.0
