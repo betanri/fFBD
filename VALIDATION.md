@@ -35,6 +35,7 @@ This file holds the numbers behind the [README Validation section](README.md#val
 | | 5c | Clock models by marginal likelihood, on DNA (RevBayes) and on the phylogram (`ffbd --ss`) | DNA; phylogram | Gamma and lognormal best or near best; exponential 9 to 147 log units worse |
 | | 5d | Sampling fraction (rho) | Phylogram | Up to 8% younger at rho 50% |
 | | 5e | Few against many genes, known true ages | Phylograms from simulated DNA | 1,000 genes more accurate than 23 (63% of nodes closer) |
+| | 5f | Partitioned branch lengths, known true ages | Phylograms from simulated DNA | One model makes young nodes too old; gene x codon (or ModelFinder) partitions remove most of it |
 | 6. Large trees | 6a | Convergence at 1,185 and 2,424 tips | Phylogram | Passed |
 | | 6b | Crown and stem rules | Phylogram | Passed |
 | | 6d | Automatic starting tree | Phylogram | Passed: valid on 1,184 species; same answer as a supplied start |
@@ -432,6 +433,44 @@ By true node age (coverage / median relative error):
 - **Young nodes still come out too old.** Even with perfect branch lengths they are +56% too old. That bias comes from the model and priors (test 4b).
 - **The SE rule and bootstrap SEs give the same result,** as on the real clades (test 5a).
 - **Caveat.** The simulated genes evolve under models the analysis can fit, so model misspecification on real genes could make the gain smaller or larger.
+
+### 5f. Partitioned branch lengths, with known true ages
+
+*Data: phylograms from simulated DNA, trees 51 to 100 of test 5e (3,393 nodes).* In test 5e, nodes under 5 Ma came out +93% too old with 23 genes, against +60% with perfect branch lengths. The extra bias comes from the branch lengths, not from `ffbd`. One GTR+G4 model for genes that evolve at different rates makes short branches too long relative to long ones: on edges touching nodes under 5 Ma, +25% with 23 genes, +13% with 1,000 genes and +1% with perfect branch lengths. Those inflated short branches push young nodes older.
+
+**Part 1: genes differ in rate (the data of test 5e).** Arms, all with the SE rule unless stated:
+
+- **one model**: concatenated, one GTR+G4 (test 5e).
+- **SEs inflated**: one model, with each standard error multiplied by a factor per branch-length class, calibrated on trees 1 to 50 (so not tuned on the trees scored here).
+- **by gene**: one GTR+F+G4 per gene, edge-proportional branch lengths (IQ-TREE `-p`).
+
+| Arm | Coverage of the 95% interval | Median relative error | Under 5 Ma: coverage / median relative error |
+|---|---|---|---|
+| exact (true branch lengths) | 0.930 | 12.3% | 0.93 / +60% |
+| 23 genes, one model (bootstrap SE) | 0.890 | 20.1% | 0.83 / +93% |
+| 23 genes, SEs inflated | 0.902 | 19.5% | 0.87 / +90% |
+| 23 genes, by gene | 0.910 | 15.1% | 0.90 / +65% |
+| 1,000 genes, one model | 0.901 | 17.4% | 0.87 / +73% |
+| 1,000 genes, by gene | 0.909 | 15.0% | 0.90 / +63% |
+
+**Part 2: genes also differ by codon position.** Real protein-coding genes differ at least as much between codon positions as between genes, and the genes of part 1 have no codon structure. `scripts/sim_codons.py` re-simulates the 23 genes codon by codon on the same trees: positions 1, 2 and 3 get rate multipliers of 0.55, 0.30 and 2.15 (nuclear) or 0.35, 0.12 and 2.53 (mitochondrial-like), each varied by gene, and position 3 has its own composition, transition bias and rate variation. The true scheme is gene x codon position. Five schemes were compared:
+
+| Scheme (23 genes, codon structure) | Coverage of the 95% interval | Median relative error | Under 5 Ma: coverage / median relative error |
+|---|---|---|---|
+| exact (true branch lengths) | 0.930 | 12.3% | 0.93 / +60% |
+| one model for all sites | 0.879 | 21.5% | 0.79 / +106% |
+| by codon position (3 parts) | 0.882 | 20.4% | 0.81 / +100% |
+| by gene (23 parts) | 0.900 | 17.2% | 0.87 / +79% |
+| by gene x codon position (69 parts) | 0.905 | 15.6% | 0.89 / +68% |
+| ModelFinder, gene x codon merged (`-m MFP+MERGE`) | 0.909 | 15.1% | 0.90 / +67% |
+
+- **Partitioning removes most of the extra bias.** Under 5 Ma, the right scheme takes coverage from 0.79 to 0.90 (0.93 with perfect branch lengths) and the bias from +106% to +67% (+60%). The remaining bias comes from the model and priors (test 4b).
+- **The scheme has to match where rates differ.** By codon position alone is hardly better than one model, and by gene alone gets only part of the way. Gene x codon position and the ModelFinder scheme are best. ModelFinder merged the 69 parts into 20 to 45 subsets (median 32) and lost nothing.
+- **Inflating the standard errors does not fix it.** It widens the intervals a little but leaves the bias.
+- **Old nodes hardly change.** Above 20 Ma the schemes differ by at most 1 to 2 points.
+- **Caveat.** How much each scheme helps depends on how much rates differ between genes and between codon positions. Here genes differ a lot (rate multipliers Gamma with shape 2, mitochondrial-like genes 10 times faster). Where codon positions dominate, partitioning by gene alone will do worse than here.
+
+Scoring: `scripts/young_fix_summary.py` (`validation/young_fix_50reps.txt`) and `scripts/codon_test_summary.py` (`validation/codon_test_50reps.txt`), as in test 5e.
 
 ## 6. Large trees
 
