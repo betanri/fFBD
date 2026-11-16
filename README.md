@@ -150,27 +150,25 @@ A clade constraint says a fossil belongs to a group, and that includes the group
 
 ## The model
 
-The model has two parts with two different kinds of rates, and each can vary in its own way:
-
-| Part | Rates | How they can vary |
-|---|---|---|
-| Tree prior (FBD) | Speciation, extinction, fossil sampling | Through time (skyline: rate shifts), the same for all lineages alive at a given time |
-| Clock | Molecular substitution rate | Across branches (relaxed clocks), with no built-in trend through time |
-
 - Fossilized birth-death process with sampled ancestors, conditioned on the root age (or the origin). Rates are constant by default, or piecewise-constant between fixed shift times (skyline FBD, below). The density matches RevBayes 1.3.2 `dnBDSTP` (with `timeline` when there are shifts) inside `dnConstrainedTopology`.
 - Fossil ages are uniform within their windows.
-- Clock (substitution rates vary across branches): one rate per branch of the living-species tree, with mean rate m ~ Exp(10). Five clock priors (`--clock`):
+- Data: for each branch, observed length ~ Normal(rate x time, standard error). The two branches at the root share one observation.
+
+### The clock model (rate changes across branches)
+
+The molecular substitution rate can differ from branch to branch, so lineages and clades can evolve at different speeds. There is no built-in trend through time.
+
+- One rate per branch of the living-species tree, with mean rate m ~ Exp(10). Five clock priors (`--clock`):
     - `exp`: each rate ~ Exponential(mean m).
     - `ln`: uncorrelated lognormal, mean m.
     - `gam`: each rate ~ Gamma(shape k, mean m).
     - `igr`: independent gamma rates as in MrBayes; the rate variance shrinks on longer branches.
     - `acln`: autocorrelated lognormal; each branch's rate is centered on its parent branch's rate, with variance growing with branch duration.
 - The clock with the best fit can be chosen by marginal likelihood (`--ss`; test 5c).
-- Data: for each branch, observed length ~ Normal(rate x time, standard error). The two branches at the root share one observation.
 
-### Rate shifts (skyline FBD)
+### The skyline model (rate changes through time)
 
-Speciation, extinction and fossil sampling can change through time (not across clades) at fixed times, as in skyline FBD in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
+Speciation, extinction and fossil sampling can change through time at fixed shift times. At any time they are the same for all lineages alive, so they do not differ across clades. This is skyline FBD, as in skyline FBD in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
 
 ```
 rate_shifts 66 201.3
