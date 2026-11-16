@@ -168,7 +168,7 @@ The molecular substitution rate can differ from branch to branch, so lineages an
 
 ### The skyline model (rate changes through time)
 
-Speciation, extinction and fossil sampling can change through time at fixed shift times. At any time they are the same for all lineages alive, so they do not differ across clades. This is skyline FBD, as in skyline FBD in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
+Speciation, extinction and fossil sampling can change through time at fixed shift times. At any time they are the same for all lineages alive, so they do not differ across clades. This is skyline FBD, as in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
 
 ```
 rate_shifts 66 201.3
