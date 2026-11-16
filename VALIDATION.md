@@ -58,7 +58,7 @@ RevBayes refused to build one bear state, because its origin was below a fossil'
 
 ### Test 1b. Rate shifts, skyline FBD (passed)
 
-*Data: no data and phylogram.* With `rate_shifts`, lambda, mu and psi are piecewise-constant between fixed times (README, Rate shifts). Results: `validation/skyline_checks.txt`; scripts `sky_density_check.py`, `sbc_sky.py`.
+*Data: no data and phylogram.* With `rate_shifts`, lambda, mu and psi are piecewise-constant between fixed times (README, The skyline model). Results: `validation/skyline_checks.txt`; scripts `sky_density_check.py`, `sbc_sky.py`.
 
 | Check | Result |
 |---|---|
