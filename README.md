@@ -150,9 +150,16 @@ A clade constraint says a fossil belongs to a group, and that includes the group
 
 ## The model
 
+The model has two parts with two different kinds of rates, and each can vary in its own way:
+
+| Part | Rates | How they can vary |
+|---|---|---|
+| Tree prior (FBD) | Speciation, extinction, fossil sampling | Through time (skyline: rate shifts), the same for all lineages alive at a given time |
+| Clock | Molecular substitution rate | Across branches (relaxed clocks), with no built-in trend through time |
+
 - Fossilized birth-death process with sampled ancestors, conditioned on the root age (or the origin). Rates are constant by default, or piecewise-constant between fixed shift times (skyline FBD, below). The density matches RevBayes 1.3.2 `dnBDSTP` (with `timeline` when there are shifts) inside `dnConstrainedTopology`.
 - Fossil ages are uniform within their windows.
-- Clock: one rate per branch of the living-species tree, with mean rate m ~ Exp(10). Five clock priors (`--clock`):
+- Clock (substitution rates vary across branches): one rate per branch of the living-species tree, with mean rate m ~ Exp(10). Five clock priors (`--clock`):
     - `exp`: each rate ~ Exponential(mean m).
     - `ln`: uncorrelated lognormal, mean m.
     - `gam`: each rate ~ Gamma(shape k, mean m).
@@ -163,7 +170,7 @@ A clade constraint says a fossil belongs to a group, and that includes the group
 
 ### Rate shifts (skyline FBD)
 
-Speciation, extinction and fossil sampling can change at fixed times, as in skyline FBD in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
+Speciation, extinction and fossil sampling can change through time (not across clades) at fixed times, as in skyline FBD in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
 
 ```
 rate_shifts 66 201.3
