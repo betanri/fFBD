@@ -253,7 +253,7 @@ def auto_start():
         return False
     defs_ = None
     rules = {}
-    for kind in ("crown", "stem"):
+    for kind in ("crown", "stem", "daughter_stem"):
         if os.path.exists(d + "/%s.tsv" % kind):
             defs_ = defs_ or extant_defs()
             for ln in rd("%s.tsv" % kind).splitlines():
@@ -281,9 +281,9 @@ def auto_start():
             sys.exit("auto start: constraint %s has no living species; give initial.nwk" % nm)
         n_ = node_of(E, "constraint " + nm)
         kind, v = rules.get(f, (None, None))
-        if kind == "crown" and (n_ is v or below(v, n_)):
+        if kind in ("crown", "daughter_stem") and (n_ is v or below(v, n_)):   # on the stem of v's first daughter: meets both rules
             if not v["ch"]:
-                sys.exit("auto start: crown rule of %s is on a single species" % f)
+                sys.exit("auto start: %s rule of %s is on a single species" % (kind, f))
             crown_on[id(v["ch"][0])].append((taxa[f][0], f))
             continue
         if kind == "stem" and below(n_, v):
@@ -535,10 +535,30 @@ if clock_init is None:
         if m:
             clock_init = float(m.group(1))
 
-# ---- crown option: crown.tsv (fossil<TAB>extant node name, e.g. n123): the fossil may attach only below that extant node ----
-crown, stem = [], []
+# ---- crown and stem rules: crown.tsv, stem.tsv, daughter_stem.tsv (fossil<TAB>extant node name, e.g. n123) ----
+# crown: the fossil attaches only below that extant node; stem: never below it; daughter_stem: below it but in neither daughter
+# crown (the first extant node, or single living species, below each of its two children), i.e. on the stem of one daughter.
+crown, stem, dstem = [], [], []
 byname = {x["name"]: x for x in nodes if not x["ch"]}
-for kind, dst in (("crown", crown), ("stem", stem)):
+byid = {x["id"]: x for x in nodes}
+exset = set(extant)
+
+
+def has_ext(x):
+    return (x["name"] in exset) if not x["ch"] else any(has_ext(c) for c in x["ch"])
+
+
+def daughters(v):
+    out = []
+    for c in v["ch"]:
+        u = c
+        while u["ch"] and not all(has_ext(k) for k in u["ch"]):
+            u = u["ch"][0] if has_ext(u["ch"][0]) else u["ch"][1]
+        out.append(u["id"])
+    return out
+
+
+for kind, dst in (("crown", crown), ("stem", stem), ("daughter_stem", dstem)):
     if not os.path.exists(d + "/%s.tsv" % kind):
         continue
     for ln in rd("%s.tsv" % kind).splitlines():
@@ -551,7 +571,13 @@ for kind, dst in (("crown", crown), ("stem", stem)):
         u = byname[fname]["parent"]
         while u is not None and u["id"] != v:
             u = u["parent"]
-        if (u is None) == (kind == "crown"):
+        anc = set()
+        u = byname[fname]["parent"]
+        while u is not None:
+            anc.add(u["id"])
+            u = u["parent"]
+        ok = (v in anc) if kind == "crown" else (v not in anc) if kind == "stem" else (v in anc and not anc & set(daughters(byid[v])))
+        if not ok:
             sys.exit("initial tree breaks the %s rule of %s" % (kind, fname))
         dst.append((name2id[fname], v))
 
@@ -595,7 +621,7 @@ with open(a.out, "w") as f:
             f.write("%d %.17g %.17g\n" % (v, lo, hi))
     if a.mode == "fast" and init_rates is not None:
         f.write("init_rates %d\n%s\n" % (K, " ".join("%.17g" % r for r in init_rates)))
-    for kind, lst in (("crown", crown), ("stem", stem)):
+    for kind, lst in (("crown", crown), ("stem", stem), ("daughter_stem", dstem)):
         if lst:
             f.write("%s %d\n" % (kind, len(lst)))
             for fid, v in lst:

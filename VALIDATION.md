@@ -39,7 +39,7 @@ This file holds the numbers behind the [README Validation section](README.md#val
 | | 5e | Few against many genes, known true ages | Phylograms from simulated DNA | 1,000 genes more accurate than 23 (63% of nodes closer) |
 | | 5f | Partitioned branch lengths, known true ages | Phylograms from simulated DNA | One model makes young nodes too old; gene x codon (or ModelFinder) partitions remove most of it |
 | 6. Large trees | 6a | Convergence at 1,185 and 2,424 tips | Phylogram | Passed |
-| | 6b | Crown and stem rules | Phylogram | Passed |
+| | 6b | Crown, stem and daughter-stem rules | Phylogram | Passed |
 | | 6d | Automatic starting tree | Phylogram | Passed: valid on 1,184 species; same answer as a supplied start |
 | | 6c | Speed | Phylogram | No slowdown with size |
 
@@ -526,22 +526,26 @@ Scoring: `scripts/young_fix_summary.py` (`validation/young_fix_50reps.txt`) and 
 - Effective sample sizes are 500 to 800 for the main parameters, and at least 139 for node ages.
 - Node-age medians agree between chains to 0.9% at the median, and 95% of nodes agree within 5%.
 
-### 6b. Crown and stem rules (passed)
+### 6b. Crown, stem and daughter-stem rules (passed)
 
-*Data: phylogram (small example).* The rules restrict where a fossil may attach: only below the crown node, or never below it. They add no density term. Proposals that would break a rule are rejected, which leaves the target distribution as the unconstrained one restricted to the allowed states. Two checks:
+*Data: phylogram (small example, bears).* The rules restrict where a fossil may attach: only below the crown node (crown), never below it (stem), or below it but in neither of its two daughter crowns (daughter stem). They add no density term. Proposals that would break a rule are rejected, which leaves the target distribution as the unconstrained one restricted to the allowed states. Three checks:
 
 1. **Exact conditioning test.**
     - **Setup.** On the small example (`examples/example_crown_stem.txt`), a run with a crown rule (FOSSIL_1) and a stem rule (FOSSIL_3) was compared with unconstrained runs, keeping only the samples where both rules held. There were 11 seeds per side and 100,001 samples each.
     - **Result.** The rules held in every sample of the constrained runs, and all quantities agreed within 1.4 standard errors (`validation/crown_stem_test_11seeds.txt`).
     - **Further checks.** A crown-only test with 2 seeds also agreed. `--check` runs, which validate the full state after every proposal, raised no error.
 2. **Regression.** With no crown or stem rules, the new version gives byte-identical log and tree files to the previous release on A06, A12, bears and catfish, with and without DNA (`validation/regression_previous_release.txt`).
+3. **Daughter-stem rule, exact conditioning test.**
+    - **Setup.** On the bears example (`examples/bears_daughter_stem.txt`), *Ursus abstrusus* was given the daughter stem of the node of *Ursus* + *Helarctos* (daughters: the *Helarctos* group and *U. arctos* + *U. maritimus*), and *U. spelaeus* the daughter stem of *U. arctos* + *U. maritimus* (daughters: the two living species). Runs with both rules were compared with runs without them, keeping only the samples where both held (`scripts/rule_filter_check.py`). There were 11 seeds per side, 50 million proposals and 10,000 samples each.
+    - **Result.** The rules held in all 110,000 samples with the rule (9,521 of 110,000 unconstrained samples met them). All 20 logged quantities agreed within 1.7 standard errors. Both daughters were used: *U. abstrusus* sat on the *Helarctos*-group stem in 27% of samples and on the *arctos* + *maritimus* stem in 73% (`validation/daughter_stem_test_11seeds.txt`).
+    - **Further checks.** An initial tree that breaks the rule is refused by ffbd and by the converter, and `--auto-start` builds a valid start. `--check-every-step` runs, which validate the full state (rules included) after every proposal, raised no error. With no daughter-stem rule, output is byte-identical to the previous release (15 settings).
 
 ### 6d. Automatic starting tree (passed)
 
 *Data: phylogram.* Without an `initial.nwk`, or with `--auto-start`, `scripts/ffbd_convert.py` builds the starting tree from the tree of living species, the fossil windows and the clade constraints:
 
 - **Fossils.** Each fossil goes on the stem of the smallest constraint containing it, at its minimum age. Fossils on one stem are stacked from the smallest constraint up.
-- **Crown-rule fossils** go on the stem of the crown node's first child.
+- **Crown-rule and daughter-stem fossils** go on the stem of the crown node's first child (a daughter crown node), which meets both rules.
 - **Node ages** start at the mean path height of the tree's branch lengths, scaled to the initial root age. They are then pushed up 0.01 Myr above any child or fossil, and to the minimum of any node calibration.
 
 The converter then runs the same checks as on a supplied tree. If the tree cannot be built, it stops with a message, for example when a constraint's living species are not a clade of the tree.

@@ -193,9 +193,13 @@ public:
     vector<string> consName;
     // crown option: crownOf[f] = extant node v; fossil f may attach only below v (inside the crown), never on or above v's stem. -1 = no crown rule
     // stem option: stemOf[f] = extant node v; fossil f may not attach below v (outside the crown); its clade constraint keeps it in the total group
-    vector<int> crownOf, stemOf; int nCrown = 0, nStem = 0;
+    // daughter-stem option: dsOf[f] = extant node v; fossil f is inside the crown of v (crownOf[f] = v) but in neither daughter crown:
+    // dsA[f], dsB[f] are the two extant nodes next below v (an extant internal node or a single living species), so f sits on the stem
+    // of one of them (or on an edge of a fossil side branch hanging from those stems). -1 = no daughter-stem rule
+    vector<int> crownOf, stemOf, dsOf, dsA, dsB; int nCrown = 0, nStem = 0, nDS = 0;
     inline bool belowNode(int c, int v) const { for (int u = par[c]; u != -1; u = par[u]) if (u == v) return true; return false; } // v is a proper ancestor of c
-    inline bool inCrown(int f) const { return (crownOf[f] < 0 || belowNode(f, crownOf[f])) && (stemOf[f] < 0 || !belowNode(f, stemOf[f])); }
+    inline bool inCrown(int f) const { return (crownOf[f] < 0 || belowNode(f, crownOf[f])) && (stemOf[f] < 0 || !belowNode(f, stemOf[f]))
+                                              && (dsOf[f] < 0 || (!belowNode(f, dsA[f]) && !belowNode(f, dsB[f]))); }
 
     // parameters
     double m = 0; vector<double> rates; double sumRates = 0;
@@ -362,12 +366,13 @@ void Chain::read(const string &path) {
     tb.resize(J); obs.resize(J); se.resize(J); lnSe.resize(J);
     for (int j = 0; j < J; j++) { int id, nb; double o, s; in >> id >> o >> s >> nb; obs[id] = o; se[id] = s; lnSe[id] = log(s); tb[id].resize(nb); for (auto &v : tb[id]) in >> v; }
     vector<double> initR;
-    calLo.assign(nNodes, -1.0); calHi.assign(nNodes, -1.0); crownOf.assign(N, -1); stemOf.assign(N, -1);
+    calLo.assign(nNodes, -1.0); calHi.assign(nNodes, -1.0); crownOf.assign(N, -1); stemOf.assign(N, -1); dsOf.assign(N, -1); dsA.assign(N, -1); dsB.assign(N, -1);
     while (in >> key) {
-        if (key == "crown" || key == "stem") {
-            int c; in >> c; auto &dst = (key == "crown") ? crownOf : stemOf;
-            for (int i = 0; i < c; i++) { int f, v; in >> f >> v; if (f < n || f >= N || v < N || v >= nNodes) die(key + " entry out of range"); if (crownOf[f] >= 0 || stemOf[f] >= 0) die("fossil has two crown/stem rules"); dst[f] = v; }
-            (key == "crown" ? nCrown : nStem) = c; continue;
+        if (key == "crown" || key == "stem" || key == "daughter_stem") {
+            int c; in >> c;
+            for (int i = 0; i < c; i++) { int f, v; in >> f >> v; if (f < n || f >= N || v < N || v >= nNodes) die(key + " entry out of range"); if (crownOf[f] >= 0 || stemOf[f] >= 0) die("fossil has two crown/stem rules");
+                if (key == "stem") stemOf[f] = v; else { crownOf[f] = v; if (key == "daughter_stem") dsOf[f] = v; } }
+            (key == "crown" ? nCrown : key == "stem" ? nStem : nDS) = c; continue;
         }
         if (key == "calibrations") { int c; in >> c; for (int i = 0; i < c; i++) { int v; double lo, hi; in >> v >> lo >> hi; calLo[v] = lo; calHi[v] = hi; lnCalConst -= log(hi - lo); } }
         else if (key == "init_rates") { int c; in >> c; initR.resize(c); for (auto &v : initR) in >> v; }
@@ -470,6 +475,14 @@ void Chain::init() {
         for (int v = 0; v < nNodes; v++) if (tips[v].size() == s.size() && tips[v] == s) { found = v; break; }
         if (found < 0) die("initial tree violates constraint " + consName[k]);
         x[k] = found;
+    }
+    // daughter-stem rule: the two daughter crowns of v are the first extant nodes (or living species) below each child of v
+    for (int f = n; f < N; f++) if (dsOf[f] >= 0) {
+        int v = dsOf[f]; if (!isExtInt[v]) die("daughter_stem node of fossil " + names[f] + " is not a node of the living tree");
+        auto hasExt = [&](int u) { return !tips[u].empty() && tips[u][0] < n; };   // tips sorted: extant species have the lowest indices
+        int d[2] = {c0[v], c1[v]};
+        for (int &u : d) { while (u >= N && !isExtInt[u]) u = hasExt(c0[u]) ? c0[u] : c1[u]; if (u >= n && u < N) die("daughter_stem: no living species below a child of the node of " + names[f]); }
+        dsA[f] = d[0]; dsB[f] = d[1];
     }
     for (int f = n; f < N; f++) if (!inCrown(f)) die("initial tree breaks the crown/stem rule of fossil " + names[f]);
     region.assign(nCons + 1, {}); label.assign(nNodes, -1); pos.assign(nNodes, -1);
@@ -668,6 +681,8 @@ bool Chain::moveRegraft(bool local) {
     if (crownOf[f] >= 0 && !belowNode(c, crownOf[f])) { attach(p, f, s, oldAgeP); return false; }
     // stem option: the new attachment must not be inside the crown (attaching on the crown node's own stem edge, c == v, is allowed)
     if (stemOf[f] >= 0 && belowNode(c, stemOf[f])) { attach(p, f, s, oldAgeP); return false; }
+    // daughter-stem option: inside the crown (checked above) and in neither daughter crown (the daughters' own stem edges are allowed)
+    if (dsOf[f] >= 0 && (belowNode(c, dsA[f]) || belowNode(c, dsB[f]))) { attach(p, f, s, oldAgeP); return false; }
     double topC = par[c] == -1 ? origin : age[par[c]];
     double dF = 0, newA = oldAgeP, logR = 0;
     if (saF) {
