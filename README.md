@@ -106,6 +106,7 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Fossil list | Name, minimum and maximum age |
 | Clade constraints | Which fossils belong in which clades |
 | Crown and stem rules (optional) | Where a fossil may sit relative to a crown group: four rules (see below) |
+| Node calibrations (optional) | Hard minimum and maximum ages for chosen nodes, the root included (see below) |
 | Sampling fraction (rho) | Share of living species included |
 | Root age prior | `uniform MIN MAX`, `soft MIN MAX SD P` (soft bounds) or `normal MEAN SD` |
 | Clock model | Chosen by fitting the five clocks on your phylogram (highly recommended; [Choosing the clock](#choosing-the-clock)), then set with `--clock` |
@@ -139,6 +140,12 @@ Every fossil follows one of four rules. The clade constraint alone gives the fir
 - **Daughter stem.** Use it when a fossil has the features of crown X but none of either daughter group, so it sits near the first split inside X without saying on which side. The daughter groups are the first nodes of the living tree below X on each side (a single living species counts). A fossil may also sit on a side branch of another fossil that hangs from those stems. The rule holds the fossil close to node X, so it acts much like a node calibration: use it only where the evidence rules out both daughter crowns.
 
 Each section is the section name and K, followed by K lines `fossil node`. `fossil` is the tip index and `node` the extant node index (X) used in the input file. The converter reads the files above (fossil name, extant node name) from the input folder. A fossil can have only one rule. The rules only restrict where a fossil can attach; they add no age prior. `examples/example_crown_stem.txt` shows the crown and stem rules, and `examples/bears_daughter_stem.txt` the daughter-stem rule.
+
+### Node calibrations
+
+A node of the living tree, the root included, can be held between a minimum and a maximum age. Add a section `calibrations K` followed by K lines `node min max` (extant node index, ages in Ma). The bounds are hard: the node never leaves them, and inside them its age follows the FBD density and the data, with a uniform calibration density. The converter reads them from `calibrations.Rev` in the input folder, one line per node in the RevBayes form `cal_X ~ dnUniform(age_X - MAX, age_X - MIN)` (X = extant node name).
+
+Fossils already date the tree, so most analyses need no calibrations. One case where they help is the root: if the root has few fossils close to it, its age can swing widely between chains or runs. A hard maximum on the root (with the root prior kept) stops that.
 
 ## Main options
 
