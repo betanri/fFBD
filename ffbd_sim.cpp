@@ -9,6 +9,9 @@
 // youngest), with lambda_i, mu_i, psi_i ~ Exp(10) independently; the input gets rate_shifts and per-interval init values, and the truth
 // line gets the per-interval rates appended (lambda_0..K, mu_0..K, psi_0..K). Without shifts the output is unchanged.
 // Optional 6th argument, e.g. lambda,mu: only these rates vary across intervals; the others are one Exp(10) value for all intervals.
+// Estimated shift times (as ffbd --rate-shifts free:K / lo:hi): 5th argument free:K:lo:hi draws K ordered times uniform on [lo, hi];
+// items lo:hi draw one time uniform on each window (plain numbers stay fixed). The times are drawn inside the rejection loop, jointly with
+// the rates, and appended to the truth line (all K times, youngest first).
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -64,7 +67,14 @@ static int sim(double t) {
 int main(int argc, char **argv) {
     string out = argv[1]; eng.seed(stoull(argv[2])); int rep = argc > 3 ? atoi(argv[3]) : 0;
     bool originMode = (argc > 4 && string(argv[4]) == "origin");
-    if (argc > 5) { string t; string a5 = argv[5]; size_t q = 0; while (q < a5.size()) { size_t e = a5.find(',', q); if (e == string::npos) e = a5.size(); shiftT.push_back(stod(a5.substr(q, e - q))); q = e + 1; } }
+    int estK = 0; double eLo = 0, eHi = 0; vector<double> wLo, wHi; bool estimated = false; // estimated shift times (prior draws)
+    if (argc > 5) {
+        string a5 = argv[5];
+        if (a5.rfind("free:", 0) == 0) { if (sscanf(a5.c_str() + 5, "%d:%lf:%lf", &estK, &eLo, &eHi) != 3 || estK < 1 || !(eHi > eLo)) { fprintf(stderr, "free:K:lo:hi\n"); return 2; } shiftT.assign(estK, 0.0); estimated = true; }
+        else { size_t q = 0; while (q < a5.size()) { size_t e = a5.find(',', q); if (e == string::npos) e = a5.size(); string it = a5.substr(q, e - q); size_t c = it.find(':');
+                   if (c == string::npos) { double d = stod(it); wLo.push_back(d); wHi.push_back(d); shiftT.push_back(d); } else { wLo.push_back(stod(it.substr(0, c))); wHi.push_back(stod(it.substr(c + 1))); shiftT.push_back(0.5 * (wLo.back() + wHi.back())); estimated = true; }
+                   q = e + 1; } }
+    }
     int nI = (int)shiftT.size() + 1;
     bool varyW[3] = {true, true, true}; // optional 6th argument: which rates vary across intervals (as ffbd shift_rates); the others are shared
     if (argc > 6) { string a6 = argv[6]; varyW[0] = a6.find("lambda") != string::npos; varyW[1] = a6.find("mu") != string::npos; varyW[2] = a6.find("psi") != string::npos; }
@@ -75,6 +85,8 @@ int main(int argc, char **argv) {
     while (true) {
         tries++;
         lam = EXP(10); mu = EXP(10); psi_ = EXP(10);
+        if (estK > 0) { for (auto &x : shiftT) x = eLo + U() * (eHi - eLo); sort(shiftT.begin(), shiftT.end()); }
+        else if (estimated) for (size_t k = 0; k < shiftT.size(); k++) if (wHi[k] > wLo[k]) shiftT[k] = wLo[k] + U() * (wHi[k] - wLo[k]);
         if (!shiftT.empty()) { lamV.assign(nI, 0); muV.assign(nI, 0); psiV.assign(nI, 0); lamV[0] = lam; muV[0] = mu; psiV[0] = psi_; for (int i = 1; i < nI; i++) { lamV[i] = varyW[0] ? EXP(10) : lam; muV[i] = varyW[1] ? EXP(10) : mu; psiV[i] = varyW[2] ? EXP(10) : psi_; } }
         double rootAge = originMode ? 15.0 + 10.0 * U() : NORM(20, 2); if (rootAge < 1) continue;
         nodes.clear(); nExtant = nFossil = 0; abortSim = false;
@@ -173,6 +185,7 @@ int main(int argc, char **argv) {
         int nsa = 0; for (int i = 0; i < nn; i++) if (nodes[i].kind == 3) nsa++;
         printf("\t%d\t%.10g", nsa, nodes[rootId].age);
         if (!shiftT.empty()) { for (double x : lamV) printf("\t%.10g", x); for (double x : muV) printf("\t%.10g", x); for (double x : psiV) printf("\t%.10g", x); }
+        if (estimated) for (double x : shiftT) printf("\t%.17g", x);
         printf("\n");
         return 0;
     }

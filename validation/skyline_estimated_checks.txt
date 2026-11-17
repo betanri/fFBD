@@ -1,0 +1,46 @@
+Estimated shift times and FBD-power stepping-stone in ffbd: checks (VALIDATION.md tests 1c and 2d).
+New options: --rate-shifts free:K [--shift-window lo,hi] | lo:hi,... | mass-extinctions ; --ss-power fbd.
+
+1. Regression (no new option = release binary, byte for byte). Linux g++ 13.3 -O3 and macOS clang:
+   24 run settings (3 examples x default, burn-in, no data, gam, acln, control, fixed shifts 4,9, shifts 3,8,13 with shift_rates
+   lambda,mu), 3M proposals: .log and .trees identical. Checkpoint (.ckp/.log/.trees, bears igr, shifts 5), stepping-stone (.pp, .ml.tsv):
+   identical. ffbd_sim: 120 runs (20 seeds x root/origin x none/4,9/4,9 lambda,mu) identical. sim_study.py simulate without shifts: identical.
+2. Cache check (--check-every-step, 20000 proposals): 3 examples x 5 clocks x {free:1, free:2, 3:6,9:13, 5,9:13}: 60/60 ok.
+3. Resume: 4M proposals in one go vs 2M + resume to 4M (bears, gam, free:2): .log and .trees identical.
+4. Prior (FBD density off, --no-fbd, 20M proposals, 4000 samples): shift times follow their prior (KS vs order statistics of
+   uniforms: free:3 on [0,30] p 0.74, 0.18, 0.09; windows 3:10, 12:20 p 0.17, 0.45; free:1 p 0.07); rates Exp(10) p 0.06-0.16;
+   a fixed time in a windowed list stays fixed.
+5. Simulation-based calibration (ffbd_sim draws shift times from their prior inside the rejection loop; sbc_sky.py; 1000 reps each,
+   1M proposals, 21 quantities incl. shift times; Bonferroni 0.05/21 = 0.0024):
+     free:1 on [2,16]                  pass
+     free:2 on [2,16]                  smallest p chi2 0.0022 (age_n1, a node age; KS p 0.029); shift times p 0.21-0.94. Repeat with new
+                                       seeds (1000 reps): pass, smallest p chi2 0.041, KS 0.047; age_n1 p 0.053.
+     windows 3:8,10:15                 pass (smallest chi2 p 0.0088)
+     free:2, origin conditioning       pass (0.0119)
+     free:2, lambda,mu vary (psi shared) pass (0.064)
+     free:2, no data                   pass (0.027)
+6. Against RevBayes 1.3.2 on a fixed tree (est_rb_check.py; rates lambda_i, mu_i, psi_i ~ Exp(10)).
+   a) Fixed shift times (bears, shifts 5,15): posterior means of all 9 rates agree (largest |z| 1.90); stepping-stone ln marginal
+      likelihood ffbd -201.050 / -201.035, RevBayes -201.048 / -201.092.
+   b) Estimated shift times: RevBayes 1.3.2 cannot be used. With a stochastic timeline (t ~ dnUniform, timeline := v(t, ...) or sort(t)),
+      dnBDSTP is recomputed after setValue (lnProbability -185.740 at t = 6.5 and -191.699 at t = 4, equal to ffbd's lnFBD to 1e-9),
+      but not during MCMC: the logged Likelihood stays at its start value (-185.740 in all 9001 samples of a 100,000-generation run with
+      mvSlide on t), so the shift time samples its prior (KS against the exact posterior p 8e-112). The estimated-time cases are therefore
+      checked against exact numerical integration instead (7).
+7. Exact numerical integration (bears tree fixed, rates fixed at lambda 0.12,0.10,0.16, mu 0.33,0.24,0.03, psi 0.05,0.005,0.002; origin 50):
+   Input: validation/est_grid_bears_input.txt; script: scripts/est_grid_check.py (one | two).
+   a) One time, window 3:10 (second shift fixed at 20); grid of 1400 cells (0.005 Myr) of ffbd's lnFBD.
+      Posterior: ffbd 2 chains x 10,000 samples, KS against the grid CDF p 0.74 (means 6.393; exact 6.390).
+      Marginal likelihood (--ss 50 --ss-power fbd): -186.5766, -186.5717; exact -186.5756.
+   b) free:2 on [0, 33.9] (both times free, ordered); grid of 0.01 Myr (5,744,355 cells; the diagonal, 0.03% of the area, left out),
+      evaluated with the test option --eval-shifts. ln Z grid -188.9435; ffbd stepping-stone -188.9499, -188.9423.
+      Posterior (2 chains, 4000 samples thinned x5): T1 exact mean 6.302, ffbd 6.296, KS p 0.37; T2 exact 18.667, ffbd 18.687, KS p 0.058.
+      The density jumps where a shift time crosses a node or fossil age, so the grid must be fine: on a 0.1 Myr grid the same chains
+      seemed off (T2 KS p < 0.001).
+8. Recovery of the number of shifts (sim_study.py with --shifts; trees of 31-119 living species, 11-60 fossils; phylogram data from the
+   model; fits none / free:1 / free:2, --ss 100 --ss-power fbd --ss-gens 2M, 2 replicates each):
+     no shift (30 trees):            best = no shift 29, one shift 1 (by 0.3 log units)
+     one shift at 50 Ma (30 trees):  best = one shift 27, two 2, none 1; median ln BF one vs none +6.1 (-0.6 to 14.2);
+                                     95% interval of the shift time covers 50 Ma in 26/30 (misses all on the older side, 51-55 Ma lower bounds)
+     two shifts at 30, 70 Ma (30):   best = one 18, none 11, two 1: two shifts are not detected on trees this small
+     replicate stepping-stone difference: median 0.45, max 3.3 log units.
