@@ -146,11 +146,13 @@ A clade constraint says a fossil belongs to a group, and that includes the group
 | `--log-rates` | Also log branch rates |
 | `--clock exp\|ln\|gam\|igr\|acln` | Clock model. Always set it, after fitting the clocks ([Choosing the clock](#choosing-the-clock)). If omitted, `exp` is used and a warning is printed |
 | `--ss K --ss-gens G` | Instead of a normal run, estimate the marginal likelihood of the phylogram by stepping-stone sampling with K+1 powers, to compare clock models |
+| `--ss-power fbd` | With `--ss`: put the powers on the FBD density instead, to compare rate models (no shifts, fixed or estimated shifts) |
+| `--rate-shifts SPEC` | Rate shifts: fixed times, `free:K`, windows `lo:hi`, or `mass-extinctions` (The skyline model, below) |
 | `--check` | Check internal consistency while running (slow) |
 
 ## The model
 
-- Fossilized birth-death process with sampled ancestors, conditioned on the root age (or the origin). Rates are constant by default, or piecewise-constant between fixed shift times (skyline FBD, below). The density matches RevBayes 1.3.2 `dnBDSTP` (with `timeline` when there are shifts) inside `dnConstrainedTopology`.
+- Fossilized birth-death process with sampled ancestors, conditioned on the root age (or the origin). Rates are constant by default, or piecewise-constant between shift times, fixed or estimated (skyline FBD, below). The density matches RevBayes 1.3.2 `dnBDSTP` (with `timeline` when there are shifts) inside `dnConstrainedTopology`.
 - Fossil ages are uniform within their windows.
 - Data: for each branch, observed length ~ Normal(rate x time, standard error). The two branches at the root share one observation.
 
@@ -168,7 +170,7 @@ The molecular substitution rate can differ from branch to branch, so lineages an
 
 ### The skyline model (rate changes through time)
 
-Speciation, extinction and fossil sampling can change through time at fixed shift times. At any time they are the same for all lineages alive, so they do not differ across clades. This is skyline FBD, as in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
+Speciation, extinction and fossil sampling can change through time at shift times, fixed or estimated from the data. At any time they are the same for all lineages alive, so they do not differ across clades. This is skyline FBD, as in BEAST2, RevBayes `dnBDSTP(timeline=...)` and MrBayes 3.2. Add one line to the input (or use `--rate-shifts` on the command line, which overrides it):
 
 ```
 rate_shifts 66 201.3
@@ -177,10 +179,33 @@ rate_shifts 66 201.3
 - K times in Ma, strictly increasing, give K+1 intervals; interval 1 is the youngest. Each interval has its own lambda, mu and psi.
 - `shift_rates lambda,mu` lets only those rates change; a rate left out (here psi) is shared by all intervals.
 - Each free rate ~ Exponential(rate 10), as in the constant model, with no smoothing between intervals: an interval with few nodes or fossils stays close to the prior.
-- Shift times are fixed, not estimated. rho applies at the present only; there are no mass extinctions or extra sampling at the shifts.
+- rho applies at the present only; there are no mass extinctions or extra sampling at the shifts.
 - The log gets one column per interval: `speciation_rate[1]`, `extinction_rate[1]`, `psi[1]`, ... (youngest first).
 - Without shifts the output is byte-identical to the constant-rate model. With 2 shifts a run takes about 60% longer per proposal.
 - Validation: test 1b of VALIDATION.md (density equals RevBayes on 1,012 states, cache check, prior recovery, simulation-based calibration).
+
+**Estimated shift times.** The shift times can be parameters of the model:
+
+| `--rate-shifts` | Shift times |
+|---|---|
+| `66,201.3` | Fixed (as above) |
+| `free:K` | K times estimated anywhere in a window, ordered; prior uniform (density K!/W^K). Window: `--shift-window lo,hi`, default 0 to the oldest fossil's minimum age |
+| `60:72,195:207` | One time estimated in each window, prior uniform on the window (windows must not overlap). A plain number in the list stays fixed |
+| `mass-extinctions` | Fixed at the major extinction events younger than the oldest fossil: K-Pg 66.0, end-Triassic 201.4, end-Permian 251.902, end-Devonian 358.9, Late Devonian (Frasnian-Famennian) 371.1, end-Ordovician 443.8 Ma (ICS chart) |
+
+- A time is moved by a sliding window or by a uniform draw between its neighbours (move `shift_time`, weight 5 per estimated time). The log gets `shift_time[1]`, ... (youngest first).
+- Each extra shift adds an interval with three more rates. Choose the number of shifts by marginal likelihood (below), not by adding shifts until the dates stop changing.
+- Validation: tests 1c and 2d of VALIDATION.md (exact numerical integration, simulation-based calibration, recovery of the number of shifts).
+
+**Choosing the rate model.** Rate models (no shifts, K estimated shifts, fixed or preset shifts) are compared by the marginal likelihood of the whole model, including the FBD density of the tree and fossils. Use `--ss K --ss-power fbd`: the stepping-stone powers go on the FBD density, while the phylogram stays at full weight. Everything else has the same prior in every rate model, so differences of `stepping_stone` in `PREFIX.ml.tsv` are log Bayes factors between rate models. (The default `--ss-power data` puts the powers on the phylogram; that compares clocks, not rate models.) A difference above 3 log units is strong support, above 5 very strong (Kass and Raftery 1995). Run two replicates of each model; they should agree within about 1 log unit, or the run needs more powers or more proposals per power.
+
+```
+for m in none free:1 free:2 free:3 mass-extinctions; do
+  ffbd run input.txt --prefix ss_${m/:/} --clock gam --burnin 1000000 --rate-shifts $m --ss 100 --ss-power fbd --ss-gens 2000000 --ss-burn 200000 --ss-every 1000
+done
+```
+
+On large trees the FBD density changes steeply near full power, so they need many more powers and longer runs per power than small ones (several hundred powers on thousands of tips). Check that the replicates agree before comparing models.
 
 ## Validation
 
@@ -215,7 +240,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 
 **How it was tested.** *No data and phylogram.* Fixed trees and parameter values were scored by fFBD and by RevBayes, the established FBD program, term by term: tree density, root prior, rate priors, branch-length terms and fossil windows. 89 states on 4 data sets.
 
-**Answer.** The totals match to within 4e-9, which is rounding error (test 1).
+**Answer.** The totals match to within 4e-9, which is rounding error (test 1). With rate shifts the density matches RevBayes too (test 1b). With estimated shift times, the posterior of the times and the marginal likelihood match exact numerical integration (test 1c).
 
 ### 2. When the true answer is known, does it find it?
 
@@ -226,6 +251,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 - **2a.** Small trees, 500 replicates in each of 3 settings, 13 quantities.
 - **2b.** Realistic trees, 500 replicates of 2 to 8,056 living species and up to 15,838 fossils, 9 quantities.
 - **2c.** A 3-species case with an exact answer.
+- **2d.** Rate shifts: simulation-based calibration with estimated shift times (6 settings, 1,000 replicates each), and recovery of the number of shifts by marginal likelihood on 90 simulated trees.
 
 **Answer.** All passed. Testing found and fixed two bugs along the way (a cached rate sum and a checkpoint restart), and all tests were rerun after the fixes.
 
@@ -340,7 +366,7 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 
 ### Why fFBD may do better than full-DNA FBD on real data
 
-Full-DNA FBD is slow, and that forces two compromises in practice. fFBD removes both.
+Full-DNA FBD is slow, and that forces three compromises in practice. fFBD removes all three.
 
 **1. All the genes, not a few dozen.**
 
@@ -356,6 +382,12 @@ Full-DNA FBD is slow, and that forces two compromises in practice. fFBD removes 
 - **What test 5b shows.** The clock matters. On the same DNA, a different clock moved some dates by about 10 million years.
 - **What test 5c shows.** Exponential, which most FBD analyses would simply have used here, fits clearly worse than gamma or lognormal on every data set: by 9 to 22 log units on the DNA of the two small clades, and by about 147 on the 1,184-species phylogram. Each phylogram fit took 2.5 to 3.8 hours on one core.
 
+**3. Rate shifts chosen by fit, not by habit.**
+
+- **Full-DNA FBD in practice.** BEAST2, RevBayes and MrBayes can fit skyline FBD, but comparing no shifts against one, two or three shifts, or against shifts at extinction events, needs a stepping-stone run per model on the DNA: the same cost that limits clock fitting to small clades. Studies therefore keep rates constant or place the shift times by hand. RevBayes 1.3.2 also cannot estimate the shift times themselves (test 1c).
+- **fFBD** fits each rate model on the phylogram of the tree being dated (no shifts, K shifts at times estimated from the data, or shifts at preset extinction events) and keeps the one the data support (`--ss-power fbd`).
+- **What test 2d shows.** On simulated trees of 30 to 120 living species, the marginal likelihood picked no shift on 29 of 30 trees simulated without a shift, and one shift on 27 of 30 simulated with one, with the true shift time inside the 95% interval on 26 of 30. It is conservative: it rarely adds a shift that is not there, and on trees this small it seldom detects a second one.
+
 ### Reproducing the tests
 
 | Test | Script | Result file |
@@ -363,7 +395,10 @@ Full-DNA FBD is slow, and that forces two compromises in practice. fFBD removes 
 | 1 | `density_check.py` | `density_check_A06_A12.txt`, `density_check_bears_catfish.txt` |
 | 2a | `sbc.py` | `sbc_with_data_500reps.txt`, `sbc_prior_only_500reps.txt`, `sbc_origin_mode_500reps.txt` |
 | 2b | `sim_study.py sbc`, `sbc_ranks.py` | `sbc_realistic_500reps.txt`, `sbc_rank_histograms.png` |
+| 1b | `sky_density_check.py`, `sbc_sky.py` | `skyline_checks.txt` |
+| 1c | `est_grid_check.py`, `est_rb_check.py` (fixed shifts only) | `skyline_estimated_checks.txt` |
 | 2c | `analytic_check.py` | `analytic_check.txt` |
+| 2d | `sbc_sky.py --shifts free:K:lo:hi`, `sim_study.py simulate --shifts` | `skyline_estimated_checks.txt` |
 | 3a | `make_fixed3.py`, `compare_fixed3.py` | `three_program_prior_A06_A12.txt`, `compare_pilots_summary.txt` |
 | 3b | `compare_runs.py` | `E1_noCE_summary.txt` |
 | 4a, 4c | `branch_scatter.py --ages-only` | `node_ages_full_vs_fast.tsv` |
@@ -398,7 +433,7 @@ Full-DNA FBD is slow, and that forces two compromises in practice. fFBD removes 
 
 - The topology of living species is fixed within a run; date several trees to cover topological uncertainty.
 - Fossils must fall inside a clade constraint below the root in root-conditioned runs.
-- Rate shift times are fixed by the user, not estimated; there are no mass extinctions or extra sampling at the shifts.
+- With rate shifts, the number of shifts is chosen by marginal likelihood across runs, not estimated within one run (no reversible jump). There are no mass extinctions or extra sampling at the shifts. On small trees (30 to 120 living species), two shifts are rarely detected (test 2d).
 - The result depends on the quality of the branch lengths and their standard errors.
 
 ## Citation and license

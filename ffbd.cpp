@@ -10,6 +10,9 @@
 //   in K+1 intervals (SkyFBD; RevBayes dnBDSTP(..., timeline=v(T1,...))). Each free rate ~ Exp(10). shift_rates (or --shift-rates)
 //   lists which of lambda, mu, psi vary across intervals (default all three); the others are one value shared by all intervals.
 //   Without shifts the program is the constant-rate model above, with byte-identical output.
+// - Shift times can also be estimated: --rate-shifts free:K (K ordered times, uniform on one window, --shift-window lo,hi) or
+//   lo:hi items (each time uniform in its own window; windows disjoint). --rate-shifts mass-extinctions gives fixed preset ages.
+// - --ss-power fbd: stepping-stone with the power on the FBD density (marginal likelihood for comparing FBD rate models).
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -148,10 +151,11 @@ struct Tune {
 };
 
 enum MoveType { M_NODE, M_COUPLED, M_FOSAGE, M_REGRAFT_L, M_REGRAFT_G, M_COLLEXP, M_ROOT, M_ROOTC, M_ORIGIN,
-                M_RATE, M_RATESCALE_JOINT, M_RATESCALE_ALL, M_MEAN, M_SIGMA, M_LAMBDA, M_MU, M_PSI, M_UPDOWN, N_MOVES };
+                M_RATE, M_RATESCALE_JOINT, M_RATESCALE_ALL, M_MEAN, M_SIGMA, M_LAMBDA, M_MU, M_PSI, M_UPDOWN, M_SHIFT, N_MOVES };
+static const int N_MOVES_CKP = 18; // moves whose counts the checkpoint stores in its main block (the shift-time move is stored with the shift times)
 static const char *MOVE_NAMES[] = {"node_slide", "node_slide_coupled", "fossil_age", "regraft_local", "regraft_global",
     "collapse_expand", "root_slide", "root_slide_coupled", "origin_slide", "rate_scale", "rates_mean_joint_scale",
-    "rates_vector_scale", "mean_rate_scale", "ucln_sigma_scale", "lambda_scale", "mu_scale", "psi_scale", "lambda_mu_updown"};
+    "rates_vector_scale", "mean_rate_scale", "ucln_sigma_scale", "lambda_scale", "mu_scale", "psi_scale", "lambda_mu_updown", "shift_time"};
 
 struct Options {
     string input, prefix = "ffbd_run";
@@ -162,6 +166,8 @@ struct Options {
     string clock = ""; double hyperRate = -1, initHyper = -1;                     // --clock exp|ln|gam|igr|acln, --hyper-rate, --init-hyper
     int ssStones = 0; double ssAlpha = 0.3; long ssGens = 0, ssBurn = 0, ssEvery = 1000; // --ss K: stepping-stone with K+1 powers (Xie et al. 2011)
     string rateShifts = "", shiftRates = "";                                       // --rate-shifts T1,T2,... and --shift-rates lambda,mu,psi (override the input)
+    string shiftWindow = "", ssPower = "data";                                     // --shift-window lo,hi (window of free:K shift times); --ss-power data|fbd
+    string evalShifts = "";                                                        // test option: print lnFBD for each line of shift times in a file ("-" = stdin)
 };
 
 class Chain {
@@ -197,6 +203,11 @@ public:
     // vary[w] (w = 0 lambda, 1 mu, 2 psi): false = one value shared by all intervals (all entries equal, one free parameter).
     int nShift = 0, nInt = 1; vector<double> shiftT; bool vary[3] = {true, true, true};
     vector<double> lamV{0.0}, muV{0.0}, psiV{0.0}; int lastInt = 0;
+    // shift times: shLo[k] <= T_k <= shHi[k] (a fixed time has shLo = shHi). estMode 0: all fixed; 1: each estimated time uniform on its own
+    // window (windows disjoint and increasing); 2: K ordered times uniform on one common window (density K!/W^K). lnShiftPrior is that density.
+    int estMode = 0, nEst = 0, lastShift = 0; bool lastShiftSlide = false; vector<double> shLo, shHi; vector<int> estIdx; double lnShiftPrior = 0.0; vector<Tune> tSh;
+    double betaF = 1.0; // power on the FBD density (stepping-stone with --ss-power fbd); 1 otherwise
+    void parseShifts(const string &spec, const vector<double> &inputT);
     inline int nFree(int w) const { return vary[w] ? nInt : 1; }
     inline int nUD() const { return (vary[0] || vary[1]) ? nInt : 1; }
     vector<double> &rateVec(int w) { return w == 0 ? lamV : w == 1 ? muV : psiV; }
@@ -228,7 +239,7 @@ public:
     double lnHyperFull() const {
         if (nShift == 0) return (log(10.0) - 10.0 * lamV[0]) + (log(10.0) - 10.0 * muV[0]) + (log(10.0) - 10.0 * psiV[0]);
         double s = 0; for (int w = 0; w < 3; w++) for (int i = 0; i < nFree(w); i++) s += log(10.0) - 10.0 * rateVec(w)[i];   // each free rate ~ Exp(10)
-        return s;
+        return s + lnShiftPrior;   // prior density of the estimated shift times (0 when all are fixed)
     }
     inline double top(int v) const { return par[v] == -1 ? origin : age[par[v]]; }
     inline int sib(int v) const { int p = par[v]; return c0[p] == v ? c1[p] : c0[p]; }
@@ -282,7 +293,7 @@ public:
     // moves
     bool moveNode(); bool moveCoupled(); bool moveFossilAge(); bool moveRegraft(bool local); bool moveCollapseExpand();
     bool moveRoot(bool coupled); bool moveOrigin(); bool moveRate(); bool moveJoint(); bool moveVector(); bool moveMean(); bool moveSigma();
-    bool moveFBDScale(int which); bool moveUpDown();
+    bool moveFBDScale(int which); bool moveUpDown(); bool moveShift();
     void validate();
 
     // output
@@ -304,7 +315,7 @@ void Chain::read(const string &path) {
     string rootp, origp; vector<double> rootv, origv;
     double initCond = 0, initClock = 0; vector<double> initLam{0.0}, initMu{0.0}, initPsi{0.0};
     auto restNums = [&](const string &k) { string line; getline(in, line); istringstream ls(line); vector<double> v; double d; while (ls >> d) v.push_back(d); if (v.empty()) die("no value after " + k); return v; };
-    string shiftRatesIn = "";
+    string shiftRatesIn = "", shiftSpecIn = "";
     while (in >> key) {
         if (key == "tips") break;
         if (key == "cond") in >> cond;
@@ -317,7 +328,7 @@ void Chain::read(const string &path) {
         else if (key == "init_lambda") initLam = restNums(key);   // one value (all intervals) or one per interval
         else if (key == "init_mu") initMu = restNums(key);
         else if (key == "init_psi") initPsi = restNums(key);
-        else if (key == "rate_shifts") { string line; getline(in, line); istringstream ls(line); double d; shiftT.clear(); while (ls >> d) shiftT.push_back(d); }
+        else if (key == "rate_shifts") getline(in, shiftSpecIn);
         else if (key == "shift_rates") in >> shiftRatesIn;
         else if (key == "init_cond_age") in >> initCond;
         else if (key == "init_clock") in >> initClock;
@@ -363,10 +374,12 @@ void Chain::read(const string &path) {
         else die("unknown section after terms: " + key);
     }
     initRates = initR;
-    // rate shifts: command line overrides the input
-    if (!opt.rateShifts.empty()) { shiftT.clear(); if (opt.rateShifts != "none") { string t; istringstream ss(opt.rateShifts); while (getline(ss, t, ',')) shiftT.push_back(stod(t)); } }
+    // rate shifts: command line overrides the input. A numeric input line also gives start values for estimated times.
+    vector<double> inputT;
+    { string t = shiftSpecIn; replace(t.begin(), t.end(), ',', ' '); istringstream ls(t); string tk;
+      while (ls >> tk) { char *e = nullptr; double d = strtod(tk.c_str(), &e); if (e && *e == 0) inputT.push_back(d); else { inputT.clear(); break; } } }
+    parseShifts(opt.rateShifts.empty() ? shiftSpecIn : opt.rateShifts == "none" ? string("") : opt.rateShifts, inputT);
     if (!opt.shiftRates.empty()) shiftRatesIn = opt.shiftRates;
-    for (size_t i = 0; i < shiftT.size(); i++) { if (!(shiftT[i] > 0) || !isfinite(shiftT[i])) die("rate shift times must be positive"); if (i && !(shiftT[i] > shiftT[i - 1])) die("rate shift times must be strictly increasing"); }
     nShift = (int)shiftT.size(); nInt = nShift + 1;
     if (!shiftRatesIn.empty()) {
         vary[0] = vary[1] = vary[2] = false; string t; istringstream ss(shiftRatesIn);
@@ -380,6 +393,7 @@ void Chain::read(const string &path) {
     };
     fillRate(lamV, initLam, 0, "lambda"); fillRate(muV, initMu, 1, "mu"); fillRate(psiV, initPsi, 2, "psi");
     P.K = Pn.K = nShift; P.T = Pn.T = shiftT;
+    tSh.assign(nShift, Tune()); for (int k = 0; k < nShift; k++) tSh[k].val = shHi[k] > shLo[k] ? 0.1 * (shHi[k] - shLo[k]) : 0.0;
     if (opt.noFbd) { if (nShift == 0) die("--no-fbd (test option) needs rate shifts"); P.off = Pn.off = true; }
     tSky.assign(4 * nInt, Tune());
     m = initClock; if (useOrigin) origin = initCond; else age[root] = initCond;
@@ -536,7 +550,7 @@ bool Chain::moveNode() {
     age[v] = newA;
     if (tdv) dP += localRateP(nodeBranches12(v), nNodeBranches[v]);
     if (useData && nNodeTerms[v] > 0) for (int i = 0; i < nNodeTerms[v]; i++) { int j = nodeTerms[v][i]; nv[i] = termLL(j); dD += nv[i] - tll[j]; }
-    if (log(rng.u()) < dF + beta * dD + dP) {
+    if (log(rng.u()) < betaF * dF + beta * dD + dP) {
         lnFBD += dF; lnData += dD; lnRatePrior += dP;
         if (useData) for (int i = 0; i < nNodeTerms[v]; i++) tll[nodeTerms[v][i]] = nv[i];
         return true;
@@ -568,7 +582,7 @@ bool Chain::moveCoupled() {
         hast += log(oldT[i] / newT[i]); if (clk < 2) dP += lnRateP1(newR[i]) - lnRateP1(oldR[i]);
     }
     if (clk >= 2) { for (int i = 0; i < nb; i++) rates[nodeBranches[v][i]] = newR[i]; dP = localRateP(S, nS) - before; for (int i = 0; i < nb; i++) rates[nodeBranches[v][i]] = oldR[i]; }
-    if (log(rng.u()) < dF + dP + hast) {
+    if (log(rng.u()) < betaF * dF + dP + hast) {
         lnFBD += dF; lnRatePrior += dP;
         for (int i = 0; i < nb; i++) { rates[nodeBranches[v][i]] = newR[i]; sumRates += newR[i] - oldR[i]; }
         return true;
@@ -588,14 +602,14 @@ bool Chain::moveFossilAge() {
         double a = lo + rng.u() * (hi - lo);
         if (nShift == 0) { age[f] = a; age[p] = a; return true; }   // constant rates: the target is flat in the SA age
         double dS = P.lnPsi(a) - P.lnPsi(age[f]);                     // shifts: psi of the interval holding the sampled ancestor
-        if (log(rng.u()) < dS) { age[f] = a; age[p] = a; lnFBD += dS; return true; }
+        if (log(rng.u()) < betaF * dS) { age[f] = a; age[p] = a; lnFBD += dS; return true; }
         return false;
     }
     hi = min(hi, age[par[f]]); if (hi <= lo) return false;
     double oldA = age[f], newA = lo + rng.u() * (hi - lo);
     double dF = (P.lnE(newA) - P.lnD(newA)) - (P.lnE(oldA) - P.lnD(oldA));
     if (nShift) dF += P.lnPsi(newA) - P.lnPsi(oldA);
-    if (log(rng.u()) < dF) { age[f] = newA; lnFBD += dF; return true; }
+    if (log(rng.u()) < betaF * dF) { age[f] = newA; lnFBD += dF; return true; }
     return false;
 }
 
@@ -666,7 +680,7 @@ bool Chain::moveRegraft(bool local) {
         double rangeOld = (par[s] == -1 ? origin : age[par[s]]) - max(age[s], ageF);
         dF = P.lnD(newA) - P.lnD(oldAgeP);
         if (nShift) dF += P.lnLam(newA) - P.lnLam(oldAgeP);
-        logR = dF + hast + log(hi - lo) - log(rangeOld);
+        logR = betaF * dF + hast + log(hi - lo) - log(rangeOld);
     }
     if (log(rng.u()) < logR) {
         attach(p, f, c, newA);
@@ -692,7 +706,7 @@ bool Chain::moveCollapseExpand() {
         if (hi <= lo) return false;
         double a = lo + rng.u() * (hi - lo);
         double dF = P.lnLam(a) + P.lnE(t) + P.lnD(a) - P.lnD(t) + (P.off ? 0.0 : LN2);
-        if (log(rng.u()) < dF + log(hi - lo)) { age[p] = a; sa[f] = 0; lnFBD += dF; return true; }
+        if (log(rng.u()) < betaF * dF + log(hi - lo)) { age[p] = a; sa[f] = 0; lnFBD += dF; return true; }
         return false;
     }
     if (p == root && !useOrigin) return false;
@@ -701,7 +715,7 @@ bool Chain::moveCollapseExpand() {
     double hi = top(p), lo = opt.rbSA ? winMax[f] : t;
     if (hi <= lo) return false;
     double dF = -(P.lnLam(age[p]) + P.lnE(t) + P.lnD(age[p]) - P.lnD(t) + (P.off ? 0.0 : LN2));
-    if (log(rng.u()) < dF - log(hi - lo)) { age[p] = t; sa[f] = 1; lnFBD += dF; return true; }
+    if (log(rng.u()) < betaF * dF - log(hi - lo)) { age[p] = t; sa[f] = 1; lnFBD += dF; return true; }
     return false;
 }
 
@@ -725,7 +739,7 @@ bool Chain::moveRoot(bool coupled) {
         double hast = 0, dP = 0;
         for (int i = 0; i < nb; i++) { int b = nodeBranches[root][i]; nT[i] = branchTime(b); oR[i] = rates[b]; nR[i] = oR[i] * oT[i] / nT[i]; hast += log(oT[i] / nT[i]); if (clk < 2) dP += lnRateP1(nR[i]) - lnRateP1(oR[i]); }
         if (clk >= 2) { for (int i = 0; i < nb; i++) rates[nodeBranches[root][i]] = nR[i]; dP = localRateP(S, nS) - before; for (int i = 0; i < nb; i++) rates[nodeBranches[root][i]] = oR[i]; }
-        if (log(rng.u()) < dF + dP0 + dP + hast) {
+        if (log(rng.u()) < betaF * dF + dP0 + dP + hast) {
             lnFBD += dF; lnRoot += dP0; lnRatePrior += dP;
             for (int i = 0; i < nb; i++) { rates[nodeBranches[root][i]] = nR[i]; sumRates += nR[i] - oR[i]; }
             return true;
@@ -738,7 +752,7 @@ bool Chain::moveRoot(bool coupled) {
     age[root] = newA;
     if (tdv) dPt += localRateP(nodeBranches12(root), nNodeBranches[root]);
     if (useData && ext) for (int i = 0; i < nNodeTerms[root]; i++) { int j = nodeTerms[root][i]; nv[i] = termLL(j); dD += nv[i] - tll[j]; }
-    if (log(rng.u()) < dF + dP0 + beta * dD + dPt) {
+    if (log(rng.u()) < betaF * dF + dP0 + beta * dD + dPt) {
         lnFBD += dF; lnRoot += dP0; lnData += dD; lnRatePrior += dPt;
         if (useData && ext) for (int i = 0; i < nNodeTerms[root]; i++) tll[nodeTerms[root][i]] = nv[i];
         return true;
@@ -752,7 +766,7 @@ bool Chain::moveOrigin() {
     if (newO <= age[root]) return false;
     double dP = originPrior.ln(newO) - lnRoot; if (!isfinite(dP)) return false;
     double dF = P.lnD(newO) - P.lnD(oldO);
-    if (log(rng.u()) < dF + dP) { origin = newO; lnFBD += dF; lnRoot += dP; return true; }
+    if (log(rng.u()) < betaF * dF + dP) { origin = newO; lnFBD += dF; lnRoot += dP; return true; }
     return false;
 }
 
@@ -833,7 +847,7 @@ bool Chain::moveFBDScale(int which) {
     if (nf == nInt) V[j] = newV; else for (auto &x_ : V) x_ = newV;
     Pn.set(lamV, muV, psiV, rho);
     double nF = lnFBDFull(Pn);
-    if (log(rng.u()) < (nF - lnFBD) + dH + log(c)) { swap(P, Pn); lnFBD = nF; lnHyper += dH; return true; }
+    if (log(rng.u()) < betaF * (nF - lnFBD) + dH + log(c)) { swap(P, Pn); lnFBD = nF; lnHyper += dH; return true; }
     if (nf == nInt) V[j] = oldV; else for (auto &x_ : V) x_ = oldV;
     return false;
 }
@@ -851,8 +865,72 @@ bool Chain::moveUpDown() {
     }
     Pn.set(lamV, muV, psiV, rho);
     double nF = lnFBDFull(Pn);
-    if (log(rng.u()) < (nF - lnFBD) + dH + 2.0 * log(c)) { swap(P, Pn); lnFBD = nF; lnHyper += dH; return true; }
+    if (log(rng.u()) < betaF * (nF - lnFBD) + dH + 2.0 * log(c)) { swap(P, Pn); lnFBD = nF; lnHyper += dH; return true; }
     lamV = oL; muV = oM; return false;
+}
+
+bool Chain::moveShift() {
+    // one estimated shift time: uniform in its allowed range (its window, between its neighbours), or a sliding window inside that range.
+    // Both proposals are symmetric (the range does not depend on the time moved) and the prior is flat on the range: accept on the FBD ratio.
+    if (nEst == 0) return false;
+    int k = estIdx[rng.below(nEst)]; lastShift = k;
+    double lo = shLo[k], hi = shHi[k];
+    if (k > 0) lo = max(lo, shiftT[k - 1]);
+    if (k + 1 < nShift) hi = min(hi, shiftT[k + 1]);
+    if (!(hi > lo)) return false;
+    double oldT = shiftT[k], newT;
+    lastShiftSlide = rng.u() < 0.5;
+    if (lastShiftSlide) newT = oldT + (rng.u() - 0.5) * tSh[k].val; else newT = lo + rng.u() * (hi - lo);
+    if (!(newT > lo && newT < hi)) return false;
+    Pn.T[k] = newT; Pn.set(lamV, muV, psiV, rho);
+    double nF = lnFBDFull(Pn);
+    bool ok = log(rng.u()) < betaF * (nF - lnFBD);
+    if (ok) { swap(P, Pn); shiftT[k] = newT; lnFBD = nF; }
+    Pn.T = P.T;
+    return ok;
+}
+
+// rate-shift specification: "" (none); fixed ages "T1,T2,..."; windows "lo:hi,..." (a time estimated in each, plain numbers stay fixed);
+// "free:K" (K ordered times on --shift-window lo,hi, default 0 to the oldest fossil's minimum age); "mass-extinctions" (preset ages).
+void Chain::parseShifts(const string &spec0, const vector<double> &inputT) {
+    string spec = spec0; replace(spec.begin(), spec.end(), ',', ' ');
+    vector<string> tk; { istringstream ls(spec); string t; while (ls >> t) tk.push_back(t); }
+    shiftT.clear(); shLo.clear(); shHi.clear(); estMode = 0; estIdx.clear(); nEst = 0; lnShiftPrior = 0.0;
+    if (tk.empty()) return;
+    double wLo = 0.0, wHi = 0.0; for (int f = n; f < N; f++) wHi = max(wHi, winMin[f]);
+    if (!opt.shiftWindow.empty()) { string w = opt.shiftWindow; replace(w.begin(), w.end(), ',', ' '); istringstream ls(w); if (!(ls >> wLo >> wHi)) die("--shift-window: give lo,hi"); }
+    if (tk.size() == 1 && tk[0].rfind("free:", 0) == 0) {
+        int K_ = atoi(tk[0].c_str() + 5); if (K_ < 1) die("--rate-shifts free:K needs K >= 1");
+        if (!(wHi > wLo) || wLo < 0) die("shift-time window: need 0 <= lo < hi (--shift-window lo,hi; default 0 to the oldest fossil's minimum age)");
+        estMode = 2; shLo.assign(K_, wLo); shHi.assign(K_, wHi);
+        bool useIn = (int)inputT.size() == K_;
+        for (int k = 0; k < K_ && useIn; k++) if (!(inputT[k] > wLo && inputT[k] < wHi) || (k && !(inputT[k] > inputT[k - 1]))) useIn = false;
+        for (int k = 0; k < K_; k++) shiftT.push_back(useIn ? inputT[k] : wLo + (k + 1) * (wHi - wLo) / (K_ + 1));
+        lnShiftPrior = lgamma(K_ + 1.0) - K_ * log(wHi - wLo);
+    } else if (tk.size() == 1 && tk[0] == "mass-extinctions") {
+        // ages (Ma, ICS chart): K-Pg 66.0, end-Triassic 201.4, end-Permian 251.902, end-Devonian (Hangenberg) 358.9,
+        // Late Devonian (Frasnian-Famennian) 371.1, end-Ordovician 443.8. Kept: the ones younger than the oldest fossil's minimum age (or --shift-window hi).
+        const double pre[] = {66.0, 201.4, 251.902, 358.9, 371.1, 443.8};
+        for (double t : pre) if (t > wLo && t < wHi) { shiftT.push_back(t); shLo.push_back(t); shHi.push_back(t); }
+        if (shiftT.empty()) die("mass-extinctions: no preset age inside the shift window");
+    } else {
+        for (size_t i = 0; i < tk.size(); i++) {
+            size_t c = tk[i].find(':');
+            if (c == string::npos) { double d = stod(tk[i]); shLo.push_back(d); shHi.push_back(d); }
+            else { double a = stod(tk[i].substr(0, c)), b = stod(tk[i].substr(c + 1)); if (!(b > a)) die("rate shift window " + tk[i] + ": need lo < hi"); shLo.push_back(a); shHi.push_back(b); estMode = 1; }
+        }
+        for (size_t i = 0; i < shLo.size(); i++) {
+            if (!(shLo[i] > 0) || !isfinite(shHi[i])) die("rate shift times must be positive");
+            if (i && !(shLo[i] > shHi[i - 1])) die(estMode ? "rate shift windows must not overlap and must increase" : "rate shift times must be strictly increasing");
+        }
+        bool useIn = inputT.size() == shLo.size();
+        for (size_t i = 0; i < shLo.size(); i++) {
+            if (shHi[i] == shLo[i]) shiftT.push_back(shLo[i]);
+            else { bool in_ = useIn && inputT[i] > shLo[i] && inputT[i] < shHi[i]; shiftT.push_back(in_ ? inputT[i] : 0.5 * (shLo[i] + shHi[i])); lnShiftPrior -= log(shHi[i] - shLo[i]); }
+        }
+    }
+    for (int k = 0; k < (int)shiftT.size(); k++) if (shHi[k] > shLo[k]) estIdx.push_back(k);
+    nEst = (int)estIdx.size();
 }
 
 void Chain::setupMoves() {
@@ -868,6 +946,7 @@ void Chain::setupMoves() {
     if (opt.fixFbd) { weights[M_ROOT] = weights[M_ROOTC] = weights[M_ORIGIN] = 0; }
     if (hasClock) { weights[M_RATE] = K; weights[M_RATESCALE_JOINT] = 3; weights[M_RATESCALE_ALL] = 2; weights[M_MEAN] = 5; if (clk > 0) weights[M_SIGMA] = 5; }
     if (!opt.fixFbd) { weights[M_LAMBDA] = 3 * nFree(0); weights[M_MU] = 3 * nFree(1); weights[M_PSI] = 3 * nFree(2); weights[M_UPDOWN] = 2 * nUD(); } // per free rate, as for one interval
+    if (!opt.fixFbd && nEst > 0) weights[M_SHIFT] = 5.0 * nEst;   // estimated shift times
     for (int i = 0; i < N_MOVES; i++) if (opt.noMoves.find(MOVE_NAMES[i]) != string::npos) weights[i] = 0.0;
     cum.resize(N_MOVES); totalW = 0; for (int i = 0; i < N_MOVES; i++) { totalW += weights[i]; cum[i] = totalW; }
 }
@@ -929,6 +1008,8 @@ void Chain::validate() {
     if (fabs(a - lnFBD) > 1e-6) { char b[300]; snprintf(b, 300, "lnFBD cache %.12g vs full %.12g", lnFBD, a); die(b); }
     if (fabs(r - lnRoot) > 1e-6) die("lnRoot cache");
     if (fabs(lnHyper - lnHyperFull()) > 1e-6) die("lnHyper cache");
+    if (P.T != shiftT || Pn.T != shiftT) die("shift time cache");
+    for (int k = 0; k < nShift; k++) if (shiftT[k] < shLo[k] || shiftT[k] > shHi[k] || (k && !(shiftT[k] > shiftT[k - 1]))) die("shift time outside its window or out of order");
     if (hasClock && fabs(rateLnPrior() - lnRatePrior) > 1e-6) die("rate prior cache");
     double d = 0; for (int j = 0; j < J; j++) { double t = useData ? termLL(j) : 0.0; d += t; if (fabs(t - tll[j]) > 1e-6) die("term cache"); } if (fabs(d - lnData) > 1e-6) die("data cache");
 }
@@ -954,6 +1035,7 @@ void Chain::writeHeader(FILE *lf, FILE *tf) {
         for (int w = 0; w < 3; w++) { if (nFree(w) == 1) fprintf(lf, "\t%s", rn[w]); else for (int i = 0; i < nInt; i++) fprintf(lf, "\t%s[%d]", rn[w], i + 1); }
         for (int i = 0; i < nInt; i++) fprintf(lf, "\tdiversification[%d]", i + 1);
         for (int i = 0; i < nInt; i++) fprintf(lf, "\tturnover[%d]", i + 1);
+        if (nEst > 0) for (int k = 0; k < nShift; k++) fprintf(lf, "\tshift_time[%d]", k + 1);
     }
     if (useOrigin) fprintf(lf, "\torigin_time");
     for (auto &nm : extName) fprintf(lf, "\tage_%s", nm.c_str());
@@ -974,6 +1056,7 @@ void Chain::writeLog(FILE *lf) {
         for (int w = 0; w < 3; w++) for (int i = 0; i < nFree(w); i++) fprintf(lf, "\t%.10g", rateVec(w)[i]);
         for (int i = 0; i < nInt; i++) fprintf(lf, "\t%.10g", lamV[i] - muV[i]);
         for (int i = 0; i < nInt; i++) fprintf(lf, "\t%.10g", muV[i] / lamV[i]);
+        if (nEst > 0) for (int k = 0; k < nShift; k++) fprintf(lf, "\t%.10g", shiftT[k]);
     }
     if (useOrigin) fprintf(lf, "\t%.10g", origin);
     for (int v : extNode) fprintf(lf, "\t%.10g", age[v]);
@@ -1006,7 +1089,9 @@ void Chain::dumpState(FILE *f) {
         if (v != root) { double bl = age[par[v]] - age[v]; if (v < N && sa[v]) s += ":0.0"; else { snprintf(buf, 64, ":%.17g", bl); s += buf; } }
     };
     rec(root); s += ';';
-    fprintf(f, "%s\t%.17g\n", s.c_str(), sigma);
+    fprintf(f, "%s\t%.17g", s.c_str(), sigma);
+    if (nEst > 0) for (int k = 0; k < nShift; k++) fprintf(f, k ? ",%.17g" : "\t%.17g", shiftT[k]);   // estimated shift times: all K times, comma-separated
+    fprintf(f, "\n");
 }
 
 void Chain::saveCheckpoint(const string &path) const {
@@ -1022,11 +1107,15 @@ void Chain::saveCheckpoint(const string &path) const {
         for (double r : rates) o << r << ' '; o << '\n';
         const Tune *ts[] = {&tLam, &tMu, &tPsi, &tUD, &tRootS, &tRootCo, &tOrigin, &tRate, &tMean, &tJoint, &tVec, &tSigma};
         for (auto *t : ts) o << t->val << ' ' << t->att << ' ' << t->acc << ' ' << t->totalAtt << ' ' << t->totalAcc << ' ' << t->cycles << '\n';
-        for (int i = 0; i < N_MOVES; i++) o << att[i] << ' ' << acc[i] << ' '; o << '\n';
+        for (int i = 0; i < N_MOVES_CKP; i++) o << att[i] << ' ' << acc[i] << ' '; o << '\n';
         if (nShift > 0) {
             o << "SKY " << nInt; for (int w = 0; w < 3; w++) for (int i = 0; i < nInt; i++) o << ' ' << rateVec(w)[i]; o << '\n';
             for (int i = 1; i < nInt; i++) for (int w = 0; w < 4; w++) { const Tune &t = tuneFor(w, i); o << t.val << ' ' << t.att << ' ' << t.acc << ' ' << t.totalAtt << ' ' << t.totalAcc << ' ' << t.cycles << '\n'; }
             o << lastInt << '\n';
+            if (nEst > 0) {
+                o << "SKYT"; for (double t : shiftT) o << ' ' << t; o << ' ' << att[M_SHIFT] << ' ' << acc[M_SHIFT] << ' ' << lastShift << '\n';
+                for (const Tune &t : tSh) o << t.val << ' ' << t.att << ' ' << t.acc << ' ' << t.totalAtt << ' ' << t.totalAcc << ' ' << t.cycles << '\n';
+            }
         }
         o << "END\n";
     }
@@ -1045,13 +1134,19 @@ void Chain::loadCheckpoint(const string &path) {
     for (double &r : rates) in >> r;
     Tune *ts[] = {&tLam, &tMu, &tPsi, &tUD, &tRootS, &tRootCo, &tOrigin, &tRate, &tMean, &tJoint, &tVec, &tSigma};
     for (auto *t : ts) in >> t->val >> t->att >> t->acc >> t->totalAtt >> t->totalAcc >> t->cycles;
-    for (int i = 0; i < N_MOVES; i++) in >> att[i] >> acc[i];
+    for (int i = 0; i < N_MOVES_CKP; i++) in >> att[i] >> acc[i];
     string e; in >> e;
     if (nShift > 0) {
         int ni = 0; if (e != "SKY") die("checkpoint has no rate-shift block (written without shifts?)"); in >> ni; if (ni != nInt) die("checkpoint has a different number of rate intervals");
         for (int w = 0; w < 3; w++) for (int i = 0; i < nInt; i++) in >> rateVec(w)[i];
         for (int i = 1; i < nInt; i++) for (int w = 0; w < 4; w++) { Tune &t = tuneFor(w, i); in >> t.val >> t.att >> t.acc >> t.totalAtt >> t.totalAcc >> t.cycles; }
         in >> lastInt >> e;
+        if (e == "SKYT") {
+            if (nEst == 0) die("checkpoint has estimated shift times; give the same --rate-shifts");
+            for (double &t : shiftT) in >> t; in >> att[M_SHIFT] >> acc[M_SHIFT] >> lastShift;
+            for (Tune &t : tSh) in >> t.val >> t.att >> t.acc >> t.totalAtt >> t.totalAcc >> t.cycles;
+            P.T = Pn.T = shiftT; in >> e;
+        } else if (nEst > 0) die("checkpoint has no estimated shift times");
     } else if (e == "SKY") die("checkpoint was written with rate shifts; give the same rate_shifts");
     if (e != "END") die("truncated checkpoint");
     recomputeAll();
@@ -1064,6 +1159,7 @@ void Chain::summary() const {
         if (weights[i] <= 0) continue;
         printf("  %-24s %12ld %12ld %8.4f", MOVE_NAMES[i], att[i], acc[i], att[i] ? (double)acc[i] / att[i] : 0.0);
         if (tmap[i]) printf("  tune=%.4g", tmap[i]->val);
+        if (i == M_SHIFT) { printf("  tune"); for (int k : estIdx) printf(" %.4g", tSh[k].val); }
         if (nShift > 0 && i >= M_LAMBDA && i <= M_UPDOWN) { int nf = i == M_UPDOWN ? nUD() : nFree(i - M_LAMBDA); if (nf > 1) { printf(" (interval 1)"); for (int q = 1; q < nf; q++) printf(" %.4g", tuneFor(i - M_LAMBDA, q).val); } }
         printf("\n");
     }
@@ -1092,7 +1188,8 @@ void Chain::run() {
     if (!opt.dumpFile.empty()) { df = fopen(opt.dumpFile.c_str(), res ? "a" : "w"); }
     if (!lf || !tf) die("cannot open output");
     printf("ffbd: taxa %d (extant %d, fossils %d), mode %s, cond %s, data %d, rho %g, moves total weight %g\n", N, n, mF, mode.c_str(), cond.c_str(), (int)useData, rho, totalW);
-    if (nShift > 0) { printf("rate shifts at"); for (double t : shiftT) printf(" %g", t); printf(" Ma: %d intervals; varying across intervals:%s%s%s\n", nInt, vary[0] ? " lambda" : "", vary[1] ? " mu" : "", vary[2] ? " psi" : ""); }
+    if (nShift > 0) { printf("rate shifts at"); for (double t : shiftT) printf(" %g", t); printf(" Ma: %d intervals; varying across intervals:%s%s%s\n", nInt, vary[0] ? " lambda" : "", vary[1] ? " mu" : "", vary[2] ? " psi" : "");
+        if (nEst > 0) { printf("estimated shift times (start values above):"); for (int k : estIdx) printf(" T%d in [%g, %g]", k + 1, shLo[k], shHi[k]); printf("%s; ln prior density %.6g\n", estMode == 2 ? ", ordered" : "", lnShiftPrior); } }
     printf("START lnFBD %.8f lnRoot %.8f lnHyper %.8f lnRatePrior %.8f lnData %.8f lnWin %.8f total %.8f\n", lnFBD, lnRoot, lnHyper, lnRatePrior, lnData, lnWin, lnFBD + lnRoot + lnHyper + lnRatePrior + lnData + lnWin);
     if (opt.check) validate();
     auto t0 = chrono::steady_clock::now();
@@ -1108,7 +1205,7 @@ void Chain::run() {
                 case M_REGRAFT_L: ok = moveRegraft(true); break; case M_REGRAFT_G: ok = moveRegraft(false); break; case M_COLLEXP: ok = moveCollapseExpand(); break;
                 case M_ROOT: ok = moveRoot(false); break; case M_ROOTC: ok = moveRoot(true); break; case M_ORIGIN: ok = moveOrigin(); break;
                 case M_RATE: ok = moveRate(); break; case M_RATESCALE_JOINT: ok = moveJoint(); break; case M_RATESCALE_ALL: ok = moveVector(); break; case M_MEAN: ok = moveMean(); break; case M_SIGMA: ok = moveSigma(); break;
-                case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break;
+                case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break;
             }
             att[mv]++; if (ok) acc[mv]++;
             tuneHit(mv, ok);
@@ -1131,7 +1228,7 @@ void Chain::run() {
             case M_REGRAFT_L: ok = moveRegraft(true); break; case M_REGRAFT_G: ok = moveRegraft(false); break; case M_COLLEXP: ok = moveCollapseExpand(); break;
             case M_ROOT: ok = moveRoot(false); break; case M_ROOTC: ok = moveRoot(true); break; case M_ORIGIN: ok = moveOrigin(); break;
             case M_RATE: ok = moveRate(); break; case M_RATESCALE_JOINT: ok = moveJoint(); break; case M_RATESCALE_ALL: ok = moveVector(); break; case M_MEAN: ok = moveMean(); break; case M_SIGMA: ok = moveSigma(); break;
-            case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break;
+            case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break;
         }
         att[mv]++; if (ok) acc[mv]++;
         if (opt.checkPerStep || (opt.check && it % 1000 == 0)) validate();
@@ -1166,21 +1263,25 @@ bool Chain::step(int mv) {
         case M_REGRAFT_L: return moveRegraft(true); case M_REGRAFT_G: return moveRegraft(false); case M_COLLEXP: return moveCollapseExpand();
         case M_ROOT: return moveRoot(false); case M_ROOTC: return moveRoot(true); case M_ORIGIN: return moveOrigin();
         case M_RATE: return moveRate(); case M_RATESCALE_JOINT: return moveJoint(); case M_RATESCALE_ALL: return moveVector(); case M_MEAN: return moveMean(); case M_SIGMA: return moveSigma();
-        case M_LAMBDA: return moveFBDScale(0); case M_MU: return moveFBDScale(1); case M_PSI: return moveFBDScale(2); case M_UPDOWN: return moveUpDown();
+        case M_LAMBDA: return moveFBDScale(0); case M_MU: return moveFBDScale(1); case M_PSI: return moveFBDScale(2); case M_UPDOWN: return moveUpDown(); case M_SHIFT: return moveShift();
     }
     return false;
 }
 void Chain::tuneHit(int mv, bool ok) {
     Tune *tm[N_MOVES] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &tRootS, &tRootCo, &tOrigin, &tRate, &tJoint, &tVec, &tMean, &tSigma, &tLam, &tMu, &tPsi, &tUD};
     if (mv >= M_LAMBDA && mv <= M_UPDOWN) tm[mv] = &tuneFor(mv - M_LAMBDA, lastInt); // the interval the move just used
+    if (mv == M_SHIFT) { if (lastShiftSlide && nEst > 0) { Tune &t = tSh[lastShift]; t.hit(ok); t.adapt(0.30, 1e-6, max(1e-6, shHi[lastShift] - shLo[lastShift])); } return; }
     if (tm[mv]) { bool slide = (mv == M_ROOT || mv == M_ROOTC || mv == M_ORIGIN); tm[mv]->hit(ok); tm[mv]->adapt(slide ? 0.44 : 0.30, 1e-6, slide ? 200.0 : 2.0); }
 }
 void Chain::runSS() {
-    if (!useData || K == 0) die("--ss needs mode fast with data");
+    const bool pF = opt.ssPower == "fbd";   // power on the FBD density (FBD model comparison) instead of the phylogram terms
+    if (opt.ssPower != "fbd" && opt.ssPower != "data") die("--ss-power: data or fbd");
+    if (!pF && (!useData || K == 0)) die("--ss needs mode fast with data");
+    if (pF && P.off) die("--ss-power fbd with --no-fbd");
     const int KS = opt.ssStones; const char *cn[] = {"exp", "ln", "gam", "igr", "acln"};
     vector<double> pw(KS + 1); for (int i = 0; i <= KS; i++) pw[i] = pow((double)i / KS, 1.0 / opt.ssAlpha);
     FILE *pf = fopen((opt.prefix + ".pp").c_str(), "w"); if (!pf) die("cannot open output");
-    fprintf(pf, "stone\tpower\titeration\tlikelihood\tprior_clock\n");
+    fprintf(pf, pF ? "stone\tpower\titeration\tlnFBD\tlnData\n" : "stone\tpower\titeration\tlikelihood\tprior_clock\n");
     printf("ffbd ss: taxa %d (extant %d, fossils %d), clock %s, hyper prior rate %g, %d+1 powers (alpha %g), %ld proposals per power after %ld burn-in, sample every %ld\n",
            N, n, mF, cn[clk], hyperRate, KS, opt.ssAlpha, opt.ssGens, opt.ssBurn, opt.ssEvery);
     auto t0 = chrono::steady_clock::now();
@@ -1189,17 +1290,20 @@ void Chain::runSS() {
     recomputeAll();
     vector<vector<double>> L(KS + 1); long it = 0;
     for (int i = KS; i >= 0; i--) {
-        beta = pw[i];
+        if (pF) betaF = pw[i]; else beta = pw[i];
         for (long b = 0; b < opt.ssBurn; b++) { int mv = pickMove(); bool ok = step(mv); tuneHit(mv, ok); }
         for (long g = 1; g <= opt.ssGens; g++) {
             int mv = pickMove(); bool ok = step(mv); att[mv]++; if (ok) acc[mv]++; it++;
-            if (g % opt.ssEvery == 0) { L[i].push_back(lnData); fprintf(pf, "%d\t%.10g\t%ld\t%.10g\t%.10g\n", i, beta, it, lnData, lnRatePrior); }
+            if (g % opt.ssEvery == 0) {
+                if (pF) { L[i].push_back(lnFBD); fprintf(pf, "%d\t%.10g\t%ld\t%.10g\t%.10g\n", i, betaF, it, lnFBD, lnData); }
+                else { L[i].push_back(lnData); fprintf(pf, "%d\t%.10g\t%ld\t%.10g\t%.10g\n", i, beta, it, lnData, lnRatePrior); }
+            }
             if (it % 5000000 == 0) recomputeAll();
             if (opt.checkPerStep) validate();
         }
         if (opt.check) validate();
         double mL = accumulate(L[i].begin(), L[i].end(), 0.0) / L[i].size();
-        printf("power %3d  beta %.6g  mean lnL %.6f  (%.0f s)\n", i, beta, mL, chrono::duration<double>(chrono::steady_clock::now() - t0).count()); fflush(stdout);
+        printf("power %3d  beta %.6g  mean lnL %.6f  (%.0f s)\n", i, pF ? betaF : beta, mL, chrono::duration<double>(chrono::steady_clock::now() - t0).count()); fflush(stdout);
     }
     fclose(pf);
     double ss = 0, ps = 0;
@@ -1212,7 +1316,9 @@ void Chain::runSS() {
         ps += d * 0.5 * (m1 + m0);
     }
     FILE *mf = fopen((opt.prefix + ".ml.tsv").c_str(), "w");
-    fprintf(mf, "clock\thyper_rate\tpowers\talpha\tgens_per_power\tseed\tstepping_stone\tpath_sampling\n%s\t%g\t%d\t%g\t%ld\t%llu\t%.6f\t%.6f\n",
+    if (pF) fprintf(mf, "clock\thyper_rate\tpowers\talpha\tgens_per_power\tseed\tstepping_stone\tpath_sampling\tpower_on\tshifts\n%s\t%g\t%d\t%g\t%ld\t%llu\t%.6f\t%.6f\tfbd\t%s\n",
+                    cn[clk], hyperRate, KS + 1, opt.ssAlpha, opt.ssGens, (unsigned long long)opt.seed, ss, ps, nShift == 0 ? "none" : (opt.rateShifts.empty() ? "input" : opt.rateShifts.c_str()));
+    else fprintf(mf, "clock\thyper_rate\tpowers\talpha\tgens_per_power\tseed\tstepping_stone\tpath_sampling\n%s\t%g\t%d\t%g\t%ld\t%llu\t%.6f\t%.6f\n",
             cn[clk], hyperRate, KS + 1, opt.ssAlpha, opt.ssGens, (unsigned long long)opt.seed, ss, ps);
     fclose(mf);
     printf("ML stepping-stone %.6f path %.6f (%.0f s)\n", ss, ps, chrono::duration<double>(chrono::steady_clock::now() - t0).count());
@@ -1223,7 +1329,8 @@ static void usage() {
     cerr << "usage: ffbd run INPUT --prefix P --seed S --gens G [--print N] [--tree-print N] [--checkpoint N] [--burnin N] [--mode fast|control] [--no-data] [--resume] [--check|--check-every-step] [--rb-sa-move] [--log-rates] [--dump FILE --dump-every N]\n"
             "       [--clock exp|ln|gam|igr|acln] [--hyper-rate R] [--init-hyper X]\n"
             "       [--rate-shifts T1,T2,...|none] [--shift-rates lambda,mu,psi]   piecewise-constant FBD rates (override input keywords rate_shifts, shift_rates)\n"
-            "       marginal likelihood: --ss K --ss-gens G [--ss-burn B] [--ss-every E] [--ss-alpha 0.3] [--burnin N]   writes PREFIX.pp, PREFIX.ml.tsv\n";
+            "       [--rate-shifts free:K [--shift-window lo,hi] | lo:hi,lo:hi,... | mass-extinctions]   estimated shift times, or preset ages\n"
+            "       marginal likelihood: --ss K --ss-gens G [--ss-burn B] [--ss-every E] [--ss-alpha 0.3] [--burnin N] [--ss-power data|fbd]   writes PREFIX.pp, PREFIX.ml.tsv\n";
     exit(2);
 }
 
@@ -1245,9 +1352,21 @@ int main(int argc, char **argv) {
         else if (a == "--ss") o.ssStones = stoi(val()); else if (a == "--ss-alpha") o.ssAlpha = stod(val()); else if (a == "--ss-gens") o.ssGens = stol(val());
         else if (a == "--ss-burn") o.ssBurn = stol(val()); else if (a == "--ss-every") o.ssEvery = stol(val());
         else if (a == "--no-fbd") o.noFbd = true; else if (a == "--rate-shifts") o.rateShifts = val(); else if (a == "--shift-rates") o.shiftRates = val();
+        else if (a == "--shift-window") o.shiftWindow = val(); else if (a == "--ss-power") o.ssPower = val(); else if (a == "--eval-shifts") o.evalShifts = val();
         else usage();
     }
     Chain c(o); c.read(o.input); c.init();
+    if (!o.evalShifts.empty()) { // test option: the FBD density of the start tree and rates at each line of shift times (one per interval boundary)
+        if (c.nShift == 0) die("--eval-shifts needs --rate-shifts with the same number of shifts");
+        istream *is = &cin; ifstream f; if (o.evalShifts != "-") { f.open(o.evalShifts); if (!f) die("cannot open " + o.evalShifts); is = &f; }
+        string line; char buf[64];
+        while (getline(*is, line)) {
+            istringstream ls(line); for (int k = 0; k < c.nShift; k++) if (!(ls >> c.Pn.T[k])) die("--eval-shifts: each line needs " + to_string(c.nShift) + " times");
+            for (int k = 1; k < c.nShift; k++) if (!(c.Pn.T[k] > c.Pn.T[k - 1])) die("--eval-shifts: times must increase");
+            c.Pn.set(c.lamV, c.muV, c.psiV, c.rho); snprintf(buf, 64, "%.12f\n", c.lnFBDFull(c.Pn)); fputs(buf, stdout);
+        }
+        return 0;
+    }
     if (o.ssStones > 0) { if (o.ssGens <= 0 || o.ssEvery <= 0) usage(); c.runSS(); } else c.run();
     return 0;
 }

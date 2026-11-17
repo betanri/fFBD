@@ -14,6 +14,9 @@ The truth (node ages, fossil ages, rates, sampled-ancestor count) goes to truth.
   sim_study.py sbc OUTDIR SEED           -> same files; parameters drawn from the ffbd priors (simulation-based calibration, exact arm only)
   sim_study.py simulate OUTDIR SEED      -> OUTDIR/{fbd_taxa.tsv,settings.Rev,backbone.nwk,initial.nwk,constraints_members.tsv,
                                              extant_nodes.Rev,fast_terms_exact.Rev,phylo_subs.nwk,truth.tsv}
+  sim_study.py simulate OUTDIR SEED --shifts T1,... --rates l,m,p/l,m,p/...
+                                          piecewise-constant rates (skyline FBD): shift ages youngest first, one rate triple per
+                                          interval (youngest first); truth.tsv gets shift_time[k] and the per-interval rates
 Standard library only (runs on OSCER without modules).
 """
 import math, os, random, sys
@@ -33,6 +36,9 @@ class Lin:
         self.start, self.end, self.kind, self.kids, self.fossils = start, None, None, [], []
 
 
+SHIFTS, RATES = [], []   # skyline scenario (--shifts, --rates): shift ages youngest first and one (lambda, mu, psi) per interval
+
+
 def forward(rng):
     """two lineages from the root at age T; returns them (each lineage: fossils, end event, children)"""
     roots = [Lin(T), Lin(T)]
@@ -43,16 +49,26 @@ def forward(rng):
         L = stack.pop()
         a = L.start
         while True:
-            a -= rng.expovariate(tot)
+            if SHIFTS:   # piecewise-constant rates: on reaching a shift, draw again with the younger interval's rates (memoryless)
+                i = sum(1 for t in SHIFTS if a > t)
+                lam_, mu_, psi_ = RATES[i]; tot_ = lam_ + mu_ + psi_; lo = SHIFTS[i - 1] if i > 0 else 0.0
+                w = rng.expovariate(tot_)
+                if i > 0 and a - w <= lo:
+                    a = lo
+                    continue
+                a -= w
+            else:
+                a -= rng.expovariate(tot)
+                lam_, mu_, psi_, tot_ = LAM, MU, PSI, tot
             if a <= 0:
                 L.end, L.kind = 0.0, 'present'
                 break
-            u = rng.random() * tot
-            if u < PSI:
+            u = rng.random() * tot_
+            if u < psi_:
                 L.fossils.append(a)
                 continue
             L.end = a
-            if u < PSI + LAM:
+            if u < psi_ + lam_:
                 L.kind = 'split'
                 L.kids = [Lin(a), Lin(a)]
                 stack += L.kids
@@ -268,6 +284,10 @@ def simulate(out, seed):
                      ('branch_rates_mean', M_RATE), ('n_extant', len(ext)), ('n_fossils', len(fos)), ('n_constraints', len(cons)),
                      ('attempts', attempt)]:
             fh.write(f'{k}\t{v}\n')
+        for k, t in enumerate(SHIFTS, 1):
+            fh.write(f'shift_time[{k}]\t{t}\n')
+        for i, (l_, m_, p_) in enumerate(RATES, 1):
+            fh.write(f'speciation_rate[{i}]\t{l_}\nextinction_rate[{i}]\t{m_}\npsi[{i}]\t{p_}\n')
         for c in nodes:
             fh.write(f'age_{nm[c]}\t{ext_nodes[c].age:.8f}\n')
         for f in sorted(fos, key=lambda z: z.name):
@@ -289,6 +309,10 @@ def iter_nodes(n):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'simulate':
+        if '--shifts' in sys.argv:
+            SHIFTS = [float(x) for x in sys.argv[sys.argv.index('--shifts') + 1].split(',')]
+            RATES = [tuple(float(x) for x in g.split(',')) for g in sys.argv[sys.argv.index('--rates') + 1].split('/')]
+            if len(RATES) != len(SHIFTS) + 1 or sorted(SHIFTS) != SHIFTS: sys.exit('--rates: one l,m,p triple per interval; --shifts increasing')
         simulate(sys.argv[2], int(sys.argv[3]))
     elif sys.argv[1] == 'sbc':
         SBC = True

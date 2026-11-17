@@ -2,6 +2,8 @@
 """Simulation-based calibration of ffbd with rate shifts (skyline FBD); same design as sbc.py.
 
   sbc_sky.py run NREP OUTDIR FFBD FFBD_SIM SEED --shifts T1,T2 [--vary lambda,mu,psi] [--origin] [--no-data] [--gens G] [--print P] [--burnin B]
+      --shifts free:K:lo:hi   K estimated shift times, ordered, uniform on [lo, hi] (ffbd --rate-shifts free:K --shift-window lo,hi)
+      --shifts lo:hi,lo:hi    one estimated time per window (plain numbers stay fixed)
   sbc_sky.py analyze OUTDIR
 
 ffbd_sim draws lambda_i, mu_i, psi_i ~ Exp(10) per interval (shared rates: one draw), the tree and the phylogram exactly from the model,
@@ -33,6 +35,7 @@ def run_one(a, inpath, prefix, seed, rep, vary, nI):
              "age_FOSSIL_1": float(t[11]), "age_FOSSIL_2": float(t[12]), "age_FOSSIL_3": float(t[13]), "mean_rt": float(t[14]),
              "num_samp_anc": float(t[15]), "root_age_tree": float(t[16])}
     rv = [float(x) for x in t[17:17 + 3 * nI]]
+    for k, x in enumerate(t[17 + 3 * nI:]): truth[f"shift_time[{k + 1}]"] = float(x)
     for w, nm in enumerate(RN):
         vals = rv[w * nI:(w + 1) * nI]
         if vary[w]:
@@ -41,6 +44,9 @@ def run_one(a, inpath, prefix, seed, rep, vary, nI):
     cmd = [a.ffbd, "run", inpath, "--prefix", prefix, "--seed", str(seed + 1), "--gens", str(a.gens), "--print", str(a.printe),
            "--tree-print", str(a.gens), "--burnin", str(a.burnin), "--log-fossils"]
     if a.no_data: cmd.append("--no-data")
+    if a.shifts.startswith("free:"):
+        K, lo, hi = a.shifts[5:].split(":"); cmd += ["--rate-shifts", "free:" + K, "--shift-window", lo + "," + hi]
+    elif ":" in a.shifts: cmd += ["--rate-shifts", a.shifts]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: raise RuntimeError("ffbd failed: " + r.stderr[:300])
     with open(prefix + ".log") as f:
@@ -83,9 +89,11 @@ if __name__ == "__main__":
     ap.add_argument("--shifts", required=True); ap.add_argument("--vary", default="lambda,mu,psi"); ap.add_argument("--origin", action="store_true")
     ap.add_argument("--no-data", action="store_true"); ap.add_argument("--gens", type=int, default=1000000); ap.add_argument("--print", dest="printe", type=int, default=5000); ap.add_argument("--burnin", type=int, default=50000)
     a = ap.parse_args()
-    nI = len(a.shifts.split(",")) + 1
+    nS = int(a.shifts[5:].split(":")[0]) if a.shifts.startswith("free:") else len(a.shifts.split(","))
+    nI = nS + 1
     vary = [w in a.vary.split(",") for w in ["lambda", "mu", "psi"]]
-    PARAMS = rate_params(nI, vary) + BASE
+    est = a.shifts.startswith("free:") or ":" in a.shifts
+    PARAMS = rate_params(nI, vary) + BASE + ([f"shift_time[{k + 1}]" for k in range(nS)] if est else [])
     o = pathlib.Path(a.outdir); o.mkdir(parents=True, exist_ok=True)
     random.seed(a.seed)
     ranksf = open(o / "ranks.tsv", "w")
