@@ -1,0 +1,69 @@
+Shift-time moves (shift_data, shift_relocate) and heated chains (--heated): checks
+================================================================================
+Scripts: scripts/sbc_sky.py (SBC; `analyze DIR` prints the tests), scripts/est_grid_check.py (exact integration),
+tests/run_tests.sh (cache checks, threads). Chi-square on 20 bins and KS on the normalised ranks; Bonferroni threshold
+0.05 / number of quantities (17 to 21 quantities).
+
+1. No new option: same output as the previous release
+   24 run settings (4 examples: default, acln, ln with burn-in, control, fixed shifts 3,9, igr with no data):
+   .log and .trees byte-identical; stepping-stone .ml.tsv identical. Runs with estimated shifts change (new moves).
+
+2. Cache check after every proposal (--check-every-step)
+   New moves: 105 runs (3 examples x 5 clocks x free:1, free:2, free:3, windows, fixed + window, free:2 lambda,mu,
+   free:3 psi only), no error.
+   Heated chains: 72 runs (4 examples x 3 clocks x no shift / free:2 / fixed shifts x heat on fbd / all), every copy
+   checked, no error. Output with 1 and 4 threads byte-identical; checkpoint + resume byte-identical.
+
+3. Prior (FBD density off, 20 million proposals, 4,000 samples)
+   All moves: shift times KS p 0.40 to 0.95; rates p 0.01 to 0.99 (41 tests).
+   Each new move alone (tree and other rates fixed): shift times KS p 0.17 to 0.95; psi p 0.45 to 0.61.
+
+4. Exact numerical integration (bears tree and rates fixed)
+   One time in a 3-10 Ma window: KS p 0.43 (6 seeds); marginal likelihood within 0.004 of exact.
+   Two free times: marginal likelihood within 0.01 of exact; posterior against the 0.01 Myr grid, 20,000 samples,
+   old and new moves: first time KS p 0.32 / 0.95, second 0.25 / 0.19.
+   (The grid script now interpolates the grid CDF inside each 0.01 Myr cell. Before, it gave each sample the CDF at the
+   top of its cell, which made the first time look slightly off, KS p 0.015 to 0.033, for the old and new moves alike.)
+   Heated chains, one time: KS p 0.17; marginal likelihood -186.579 / -186.575 / -186.576 / -186.572, exact -186.576.
+
+5. SBC with the new moves, 1,000 replicates per setting (ffbd_sim draws times and rates from the prior)
+   setting                              smallest p (chi2, KS)   shift times (chi2 / KS p)
+   free:1 on [2, 16]                    0.044, 0.011            0.61 / 0.078
+   free:2 on [2, 16]                    0.033, 0.089            0.89 / 0.93; 0.035 / 0.23
+   windows 3-8, 10-15 Ma                0.037, 0.017            0.48 / 0.30; 0.73 / 0.25
+   free:2, origin conditioning          0.014, 0.065            0.015 / 0.45; 0.44 / 0.12
+   free:2, only lambda and mu vary      0.069, 0.079            0.68 / 0.31; 0.67 / 0.93
+   free:2, no data                      0.032, 0.010            0.79 / 0.81; 0.87 / 0.98
+   All passed (thresholds 0.0024 to 0.0029).
+
+6. Number of shifts by marginal likelihood, new moves (same 90 simulated trees design as test 2d)
+   true model     picked                     notes
+   no shift       none 30                    median log BF one vs none -2.1
+   one shift      one 27, two 3, none 0      median log BF one vs none +5.7; true time in the 95% interval on 26 of 30
+   two shifts     one 15, none 11, two 4
+   Replicate stepping-stone estimates differed by a median of 0.42 to 0.47 log units (largest 4.3).
+
+7. SBC with heated chains (--heated 3, --swap-every 100, 1 million proposals per replicate, every run reported)
+   run                                              burn-in   replicates   smallest p (chi2, KS)          result
+   free:2 [2,16], heat on FBD                       100k      1000         0.011, 0.13                    passed
+   free:2 [2,16], heat on FBD and data              100k      1000         0.022, 0.059                   passed
+   windows 3-8, 10-15, heat on FBD                  100k      1000         0.0019 (shift_time[1]), 0.005  failed
+   fixed 6,12, heat on FBD and data, hottest 0.2    100k      1000         0.034, 0.027                   passed
+   windows, heat on FBD, new seeds                  100k      755 (stopped) 0.062, 0.0011 (age of node 1)  failed
+   free:2, heat on FBD, new seeds                   2M        1000         0.0004 (num_samp_anc), 0.018   failed
+   windows, heat on FBD, new seeds                  2M        468 (stopped) 0.0022 (num_samp_anc), 0.014  failed
+   windows, heat on FBD, hottest 0.9                2M        1000         0.15, 0.024                    passed
+   windows, heat on FBD, new seeds                  10M       1000         0.022, 0.11                    passed
+   Fresh repeat, new seeds, 2,000 replicates each (decided before seeing the results):
+   free:2 [2,16], heat on FBD                       100k      2000         0.0067, 0.010                  passed
+   windows 3-8, 10-15, heat on FBD                  100k      2000         0.019, 0.010                   passed
+   Shift times in the fresh repeat: chi2 / KS p 0.78 / 0.36 and 0.52 / 0.68 (free:2); 0.16 / 0.55 and 0.98 / 0.93 (windows).
+   The failing quantity differed from run to run (a shift time, a node age, the number of sampled ancestors), and the
+   runs with the largest number of replicates passed.
+
+8. Heated against plain chains on one data set (examples/example_input.txt, gamma clock, 40 million proposals per run,
+   20 runs of each with different seeds; heated: 3 copies, heat on FBD, powers 1, 0.55, 0.3, swap acceptance 0.21 and 0.46)
+   Welch t-test of the run means, 24 quantities each:
+   windows 3-6, 9-13 Ma: smallest p 0.23 (extinction_rate[2]); no quantity differs
+   free:2 on [1, 16]:   smallest p 0.12 (extinction_rate[1]); no quantity differs
+   Earlier: bears, heated against plain, 4 seeds x 30 million, 32 quantities: largest difference 1.9 standard errors.

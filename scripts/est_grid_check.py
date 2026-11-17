@@ -14,6 +14,7 @@ by stepping-stone with --ss-power fbd.
 The FBD density jumps where a shift time crosses a node or fossil age (the event moves to the other interval), so the grid must be fine:
 on a 0.1 Myr grid the two-time posterior seemed off (KS p < 0.001); on the 0.01 Myr grid it agrees.
 RevBayes 1.3.2 cannot be used for this check: during MCMC it does not recompute dnBDSTP when a stochastic timeline changes.
+Environment (optional): SEEDS (default 1,2), THIN (default 5), EXTRA (more ffbd options, e.g. "--heated 4 --swap-every 20").
 Standard library only.
 """
 import sys, os, math, csv, subprocess, threading, pathlib
@@ -33,14 +34,14 @@ def evaluate(ffbd, inp, o, spec, extra, rows):
     vals = [float(x) for x in p.stdout]; th.join(); p.wait()
     return vals
 
-def run_ffbd(ffbd, inp, o, spec, extra, seeds=(1, 2)):
+def run_ffbd(ffbd, inp, o, spec, extra, seeds=tuple(int(x) for x in os.environ.get("SEEDS", "1,2").split(","))):
     logs, mls = [], []
     for s in seeds:
         subprocess.run([ffbd, "run", inp, "--prefix", f"{o}/mc{s}", "--mode", "control", "--seed", str(s), "--gens", "20000000", "--print", "2000",
-                        "--tree-print", "20000000", "--burnin", "100000", "--no-moves", OFF, "--rate-shifts", spec] + extra, check=True, capture_output=True)
+                        "--tree-print", "20000000", "--burnin", "100000", "--no-moves", OFF, "--rate-shifts", spec] + extra + os.environ.get("EXTRA", "").split(), check=True, capture_output=True)
         logs.append(f"{o}/mc{s}.log")
         subprocess.run([ffbd, "run", inp, "--prefix", f"{o}/ss{s}", "--mode", "control", "--seed", str(s), "--burnin", "100000", "--no-moves", OFF,
-                        "--rate-shifts", spec, "--ss", "50", "--ss-power", "fbd", "--ss-gens", "400000", "--ss-burn", "40000", "--ss-every", "40"] + extra,
+                        "--rate-shifts", spec] + os.environ.get("EXTRA", "").split() + ["--ss", "50", "--ss-power", "fbd", "--ss-gens", "400000", "--ss-burn", "40000", "--ss-every", "40"] + extra,
                        check=True, capture_output=True)
         r = list(csv.DictReader(open(f"{o}/ss{s}.ml.tsv"), delimiter="\t")); mls.append(float(r[0]["stepping_stone"]))
     return logs, mls
@@ -54,7 +55,9 @@ def compare(name, lo, h, mass, smp):
     """mass[i]: posterior mass of the cell [lo + i h, lo + (i+1) h); smp: ffbd samples (thinned x5 for the KS test)."""
     S = sum(mass); cdf = []; c = 0.0
     for m in mass: c += m / S; cdf.append(c)
-    n = len(mass); us = [cdf[min(max(int((x - lo) / h), 0), n - 1)] for x in smp[::5]]
+    n = len(mass); us = []
+    for x in smp[::int(os.environ.get("THIN", "5"))]:   # CDF linear inside each cell (the cell's upper end would bias the KS test)
+        i = min(max(int((x - lo) / h), 0), n - 1); us.append((cdf[i - 1] if i else 0.0) + min(max((x - lo - i * h) / h, 0.0), 1.0) * mass[i] / S)
     d, p = ks_uniform(us)
     mean = sum((lo + (i + 0.5) * h) * m for i, m in enumerate(mass)) / S
     print(f"{name}: exact mean {mean:.4f}, ffbd mean {sum(smp) / len(smp):.4f}; KS against the exact CDF D {d:.4f} p {p:.3f} (n {len(us)})")

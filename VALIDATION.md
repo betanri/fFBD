@@ -27,6 +27,7 @@ This file holds the numbers behind the [README Validation section](README.md#val
 | | 2b | Simulation-based calibration, 2 to 8,056 living species | Simulated phylogram | Passed |
 | | 2c | Exact 3-species prior | No data | Passed |
 | | 2d | Estimated shift times: simulation-based calibration; number of shifts by marginal likelihood | No data and simulated phylogram | Passed; 0 or 1 shift recovered on 29 and 27 of 30 trees |
+| | 2e | Heated chains (Metropolis-coupled MCMC): simulation-based calibration; heated against plain chains | Simulated phylogram | Passed on a larger repeat; no difference from plain chains |
 | 3. Independent program agrees | 3a | fFBD, MrBayes and RevBayes on the same fixed-rate prior | No data | fFBD = MrBayes; RevBayes differs |
 | | 3b | fFBD and RevBayes with one RevBayes move off | No data | Agree |
 | 4. Shortcut = DNA | 4a | fFBD against RevBayes full-DNA FBD | DNA vs phylogram | Agree, within DNA chain noise |
@@ -89,10 +90,12 @@ Differences from RevBayes that remain, and why:
 | Prior recovery | with the FBD density switched off, shift times follow their prior (order statistics of uniforms; KS p 0.07 to 0.74) and rates Exp(10) |
 | Exact integration, one time | bears tree and rates fixed, one time in a 3-10 Ma window: posterior against a 1,400-cell grid, KS p 0.74; marginal likelihood -186.577 and -186.572 against exact -186.576 |
 | Exact integration, two free times | `free:2` on [0, 33.9]: marginal likelihood -188.950 and -188.942 against -188.944 on a 0.01 Myr grid (5.7 million cells); posterior against the grid, KS p 0.37 (first time) and 0.06 (second) |
+| New moves `shift_data`, `shift_relocate` | cache check in 105 runs; prior recovered by each move alone (KS p 0.17 to 0.95); one time: KS p 0.43, marginal likelihood within 0.004 of exact; two times: within 0.01, posterior against the grid KS p 0.32 and 0.25 (20,000 samples); runs without estimated shifts byte-identical to the previous release |
 | Fixed shifts against RevBayes | bears tree fixed, rates free: posterior means of all 9 rates agree (within 1.9 Monte Carlo standard errors); marginal likelihood -201.050 / -201.035 against RevBayes -201.048 / -201.092 |
 
 Notes:
 - The FBD density jumps where a shift time crosses a node or fossil age, because the event then falls in the other interval, so the grid has to be fine: on a 0.1 Myr grid the two-time posterior seemed off (KS p < 0.001); on the 0.01 Myr grid it agrees. The grid is computed with the test option `--eval-shifts FILE`, which prints the FBD density of the start tree and rates for each line of shift times.
+- The grid KS test interpolates the grid CDF inside each 0.01 Myr cell. An earlier version of the script gave each sample the CDF at the top of its cell, which made the first time look slightly off (KS p 0.015 to 0.033) for the old and new moves alike.
 - RevBayes 1.3.2 cannot check estimated shift times. With a stochastic timeline (`t ~ dnUniform(...)`, `timeline := v(t, ...)`), dnBDSTP gives the right value after `setValue`, but during MCMC it is not recomputed when the time moves: the likelihood stays at its start value in every sample, so the time samples its prior (KS p 8e-112 against the exact posterior). Exact integration replaces RevBayes for these checks.
 
 ## 2. Finds the known truth
@@ -167,7 +170,35 @@ Each panel is a histogram of the rank of the true value (0 to 99) over the 500 r
 | One shift at 50 Ma (fossil sampling 0.03 before, 0.006 after) | one 27, two 2, none 1 | median log Bayes factor one vs none +6.1; true time inside the 95% interval on 26 of 30 |
 | Two shifts at 30 and 70 Ma | one 18, none 11, two 1 | two shifts are rarely detected on trees this small |
 
-Replicate stepping-stone estimates differed by a median of 0.45 log units (largest 3.3). The four misses of the shift time all fell on the older side (lower bounds 51 to 55 Ma); this study simulates with fixed parameters and a tree-size filter, so unlike SBC it does not have to give exactly 95%.
+Replicate stepping-stone estimates differed by a median of 0.45 log units (largest 3.3).
+
+**With the new shift-time moves** (`shift_data`, `shift_relocate`; README, The skyline model) all six SBC settings were rerun with 1,000 new replicates each: smallest p-values 0.010 to 0.069 (chi-square or KS), shift times p 0.015 to 0.98; all passed. The recovery study was rerun on 90 new trees: no shift picked on 30 of 30, one shift on 27 of 30 (two on 3) with the true time inside the 95% interval on 26 of 30, and for two true shifts one 15, none 11, two 4. Details: `validation/shift_moves_heated_checks.txt`. The four misses of the shift time all fell on the older side (lower bounds 51 to 55 Ma); this study simulates with fixed parameters and a tree-size filter, so unlike SBC it does not have to give exactly 95%.
+
+### 2e. Heated chains (passed on a larger repeat)
+
+*Data: simulated phylograms.* `--heated K` runs K copies with the FBD density (or FBD and phylogram) raised to powers between 1 and `--hottest`, and logs the cold copy (README, Heated chains). Results: `validation/shift_moves_heated_checks.txt`.
+
+**Code checks.** Cache check of every copy after every proposal: 72 runs (4 examples, 3 clocks, no shift / `free:2` / fixed shifts, heat on FBD or on FBD and data), no error. Output with 1 and 4 threads byte-identical; checkpoint and resume byte-identical. Exact integration, one shift time: KS p 0.17, marginal likelihood -186.579 to -186.572 against exact -186.576.
+
+**Simulation-based calibration.** 3 copies, `--swap-every 100`, 1,000 replicates per run. Every run is listed:
+
+| Run | Burn-in | Replicates | Smallest p (chi-square, KS) | Result |
+|---|---|---|---|---|
+| `free:2`, heat on FBD | 100k | 1,000 | 0.011, 0.13 | Passed |
+| `free:2`, heat on FBD and data | 100k | 1,000 | 0.022, 0.059 | Passed |
+| Windows 3-8 and 10-15 Ma, heat on FBD | 100k | 1,000 | 0.0019 (first shift time), 0.005 | Failed |
+| Fixed shifts 6 and 12, heat on FBD and data, hottest 0.2 | 100k | 1,000 | 0.034, 0.027 | Passed |
+| Windows, heat on FBD, new seeds | 100k | 755 (stopped) | 0.062, 0.0011 (a node age) | Failed |
+| `free:2`, heat on FBD, new seeds | 2M | 1,000 | 0.0004 (sampled ancestors), 0.018 | Failed |
+| Windows, heat on FBD, new seeds | 2M | 468 (stopped) | 0.0022 (sampled ancestors), 0.014 | Failed |
+| Windows, heat on FBD, hottest 0.9 | 2M | 1,000 | 0.15, 0.024 | Passed |
+| Windows, heat on FBD, new seeds | 10M | 1,000 | 0.022, 0.11 | Passed |
+| **Repeat**, `free:2`, heat on FBD, new seeds | 100k | 2,000 | 0.0067, 0.010 | Passed |
+| **Repeat**, windows, heat on FBD, new seeds | 100k | 2,000 | 0.019, 0.010 | Passed |
+
+Four of the first nine runs had one quantity below the Bonferroni threshold (0.0024), more than the about 1 in 10 expected by chance, all with the heat on the FBD density only. The failing quantity changed from run to run, and a longer burn-in did not remove it. The code was checked again (every acceptance ratio uses the same power as the swap step), and two tests with more power were run. A repeat with new seeds and 2,000 replicates in each of the two settings with failures, decided before seeing any result, passed. The direct comparison below found no difference. The earlier failures are most likely chance, made more frequent by rerunning the settings that had failed. Heated chains have still been checked less than the plain sampler.
+
+**Heated against plain chains.** One data set (`examples/example_input.txt`, gamma clock), 20 plain and 20 heated runs (3 copies, heat on FBD, powers 1, 0.55, 0.3), 40 million proposals each, different seeds. Welch t-test of the run means for 24 quantities: smallest p 0.23 with two shift windows, 0.12 with `free:2`. No quantity differs. Earlier, on the bears data, 4 seeds of 30 million: largest difference 1.9 standard errors over 32 quantities.
 
 ## 3. Independent program agrees
 
