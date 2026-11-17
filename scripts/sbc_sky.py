@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Simulation-based calibration of ffbd with rate shifts (skyline FBD); same design as sbc.py.
 
-  sbc_sky.py run NREP OUTDIR FFBD FFBD_SIM SEED --shifts T1,T2 [--vary lambda,mu,psi] [--origin] [--no-data] [--gens G] [--print P] [--burnin B]
+  sbc_sky.py run NREP OUTDIR FFBD FFBD_SIM SEED --shifts T1,T2 [--vary lambda,mu,psi] [--origin] [--no-data] [--gens G] [--print P] [--burnin B] [--ffbd-extra "OPTIONS"]
       --shifts free:K:lo:hi   K estimated shift times, ordered, uniform on [lo, hi] (ffbd --rate-shifts free:K --shift-window lo,hi)
       --shifts lo:hi,lo:hi    one estimated time per window (plain numbers stay fixed)
   sbc_sky.py analyze OUTDIR
@@ -47,6 +47,7 @@ def run_one(a, inpath, prefix, seed, rep, vary, nI):
     if a.shifts.startswith("free:"):
         K, lo, hi = a.shifts[5:].split(":"); cmd += ["--rate-shifts", "free:" + K, "--shift-window", lo + "," + hi]
     elif ":" in a.shifts: cmd += ["--rate-shifts", a.shifts]
+    cmd += a.ffbd_extra.split()
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode: raise RuntimeError("ffbd failed: " + r.stderr[:300])
     with open(prefix + ".log") as f:
@@ -88,6 +89,7 @@ if __name__ == "__main__":
     ap.add_argument("cmd"); ap.add_argument("nrep", type=int); ap.add_argument("outdir"); ap.add_argument("ffbd"); ap.add_argument("sim"); ap.add_argument("seed", type=int)
     ap.add_argument("--shifts", required=True); ap.add_argument("--vary", default="lambda,mu,psi"); ap.add_argument("--origin", action="store_true")
     ap.add_argument("--no-data", action="store_true"); ap.add_argument("--gens", type=int, default=1000000); ap.add_argument("--print", dest="printe", type=int, default=5000); ap.add_argument("--burnin", type=int, default=50000)
+    ap.add_argument("--ffbd-extra", default="", help="more ffbd options, e.g. \"--heated 3 --swap-every 100\"")
     a = ap.parse_args()
     nS = int(a.shifts[5:].split(":")[0]) if a.shifts.startswith("free:") else len(a.shifts.split(","))
     nI = nS + 1

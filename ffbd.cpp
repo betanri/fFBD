@@ -33,6 +33,10 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <memory>
 
 using namespace std;
 static const double LN2 = 0.6931471805599453;
@@ -47,6 +51,11 @@ struct RNG {
         double a = u(), b = u();
         if (a <= 0) a = 1e-300;
         return sqrt(-2 * log(a)) * cos(6.283185307179586 * b);
+    }
+    inline double gamma1(double a) { // Gamma(shape a >= 1, rate 1), Marsaglia and Tsang (2000)
+        double d = a - 1.0 / 3.0, c = 1.0 / sqrt(9.0 * d);
+        for (;;) { double z = normal(), v = 1.0 + c * z; if (v <= 0) continue; v = v * v * v; double w = u(); if (w <= 0) continue;
+            if (log(w) < 0.5 * z * z + d - d * v + d * log(v)) return d * v; }
     }
 };
 
@@ -151,11 +160,11 @@ struct Tune {
 };
 
 enum MoveType { M_NODE, M_COUPLED, M_FOSAGE, M_REGRAFT_L, M_REGRAFT_G, M_COLLEXP, M_ROOT, M_ROOTC, M_ORIGIN,
-                M_RATE, M_RATESCALE_JOINT, M_RATESCALE_ALL, M_MEAN, M_SIGMA, M_LAMBDA, M_MU, M_PSI, M_UPDOWN, M_SHIFT, N_MOVES };
+                M_RATE, M_RATESCALE_JOINT, M_RATESCALE_ALL, M_MEAN, M_SIGMA, M_LAMBDA, M_MU, M_PSI, M_UPDOWN, M_SHIFT, M_SHIFTD, M_RELOC, N_MOVES };
 static const int N_MOVES_CKP = 18; // moves whose counts the checkpoint stores in its main block (the shift-time move is stored with the shift times)
 static const char *MOVE_NAMES[] = {"node_slide", "node_slide_coupled", "fossil_age", "regraft_local", "regraft_global",
     "collapse_expand", "root_slide", "root_slide_coupled", "origin_slide", "rate_scale", "rates_mean_joint_scale",
-    "rates_vector_scale", "mean_rate_scale", "ucln_sigma_scale", "lambda_scale", "mu_scale", "psi_scale", "lambda_mu_updown", "shift_time"};
+    "rates_vector_scale", "mean_rate_scale", "ucln_sigma_scale", "lambda_scale", "mu_scale", "psi_scale", "lambda_mu_updown", "shift_time", "shift_data", "shift_relocate"};
 
 struct Options {
     string input, prefix = "ffbd_run";
@@ -168,6 +177,7 @@ struct Options {
     string rateShifts = "", shiftRates = "";                                       // --rate-shifts T1,T2,... and --shift-rates lambda,mu,psi (override the input)
     string shiftWindow = "", ssPower = "data";                                     // --shift-window lo,hi (window of free:K shift times); --ss-power data|fbd
     string evalShifts = "";                                                        // test option: print lnFBD for each line of shift times in a file ("-" = stdin)
+    int heated = 1, threads = 0; double hottest = 0.3; string heatOn = "fbd"; long swapEvery = 1000; // Metropolis-coupled MCMC (--heated K)
 };
 
 class Chain {
@@ -297,7 +307,16 @@ public:
     // moves
     bool moveNode(); bool moveCoupled(); bool moveFossilAge(); bool moveRegraft(bool local); bool moveCollapseExpand();
     bool moveRoot(bool coupled); bool moveOrigin(); bool moveRate(); bool moveJoint(); bool moveVector(); bool moveMean(); bool moveSigma();
-    bool moveFBDScale(int which); bool moveUpDown(); bool moveShift();
+    bool moveFBDScale(int which); bool moveUpDown(); bool moveShift(); bool moveShiftData(); bool moveRelocate();
+    // data-guided shift proposals (moves shift_data, shift_relocate): exposure (lineage time) and fossil counts of the sampled tree
+    vector<double> exA, exC, exN, foA; void buildExposure();
+    double expo(double t) const; int fosBelow(double t) const;
+    double scoreInt(double a, double b) const;           // ln of the Poisson-Gamma approximation to the psi part of one interval [a, b)
+    double lnQpsi(double a, double b, double p) const;  // ln density of the psi proposal Gamma(beta n + 1, beta L + 10) of interval [a, b)
+    double drawPsi(double a, double b);
+    bool redrawPsi() const { return vary[2] && weights[M_PSI] > 0; }
+    double lnSegQ(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double t, double lo, double hi) const;
+    double drawSeg(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double lo, double hi);
     void validate();
 
     // output
@@ -905,6 +924,152 @@ bool Chain::moveShift() {
     return ok;
 }
 
+// ---- data-guided shift proposals ----------------------------------------------------------------------------------------------
+// On a large tree the FBD density of a shift time is very peaked and multimodal (it jumps where the time crosses a node or fossil age,
+// and the rates of the two intervals are tuned to the current time), so single-time random-walk and uniform proposals with the rates
+// held fixed stay in one mode. The two moves below propose from an approximation instead and correct for it exactly (Metropolis-
+// Hastings): the psi part of the FBD density of an interval [a, b) is about psi^n exp(-psi L), with n the fossils dated in [a, b) and
+// L the lineage time of the sampled tree in [a, b). With the Exp(10) prior and the power beta on the FBD density (1 outside the
+// stepping-stone) psi integrates out to G(n, L) = Gamma(beta n + 1) / (beta L + 10)^(beta n + 1), the guide for a time, and psi given
+// the time is about Gamma(beta n + 1, rate beta L + 10), the psi proposal. The tree is fixed during the move, so the guide is the same
+// function for the forward and the reverse proposal; a uniform component (10%) keeps every time reachable.
+void Chain::buildExposure() {
+    vector<pair<double, double>> ev; ev.reserve(2 * nNodes + 2);
+    for (int v = 0; v < nNodes; v++) {
+        double lo_ = age[v], hi_;
+        if (v == root) { if (!useOrigin) continue; hi_ = origin; } else hi_ = age[par[v]];
+        if (hi_ > lo_) { ev.push_back({lo_, 1.0}); ev.push_back({hi_, -1.0}); }
+    }
+    sort(ev.begin(), ev.end());
+    exA.assign(1, 0.0); exC.assign(1, 0.0); exN.assign(1, 0.0);
+    for (auto &e : ev) {
+        if (e.first > exA.back()) { exC.push_back(exC.back() + exN.back() * (e.first - exA.back())); exA.push_back(e.first); exN.push_back(exN.back()); }
+        exN.back() += e.second;
+    }
+    foA.clear(); for (int f = n; f < N; f++) foA.push_back(age[f]); sort(foA.begin(), foA.end());
+}
+double Chain::expo(double t) const {
+    if (!isfinite(t)) return exC.back();
+    if (t <= exA[0]) return 0.0;
+    size_t i = upper_bound(exA.begin(), exA.end(), t) - exA.begin() - 1;
+    return exC[i] + exN[i] * (t - exA[i]);
+}
+int Chain::fosBelow(double t) const { return isfinite(t) ? int(lower_bound(foA.begin(), foA.end(), t) - foA.begin()) : (int)foA.size(); }
+double Chain::scoreInt(double a, double b) const {
+    double nn = betaF * (fosBelow(b) - fosBelow(a)), L = betaF * (expo(b) - expo(a));
+    return lgamma(nn + 1.0) - (nn + 1.0) * log(L + 10.0);
+}
+double Chain::lnQpsi(double a, double b, double p) const {
+    double sh = betaF * (fosBelow(b) - fosBelow(a)) + 1.0, r = betaF * (expo(b) - expo(a)) + 10.0;
+    return sh * log(r) - lgamma(sh) + (sh - 1.0) * log(p) - r * p;
+}
+double Chain::drawPsi(double a, double b) {
+    double sh = betaF * (fosBelow(b) - fosBelow(a)) + 1.0, r = betaF * (expo(b) - expo(a)) + 10.0;
+    return rng.gamma1(sh) / r;
+}
+// piecewise-constant proposal on [lo, hi]: segments bp[j]..bp[j+1] with log weight lw[j] (segment length x guide at its midpoint),
+// mixed 90:10 with the uniform density
+static const double SEG_UNIF = 0.1;
+double Chain::lnSegQ(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double t, double lo, double hi) const {
+    size_t j = upper_bound(bp.begin(), bp.end(), t) - bp.begin(); j = j == 0 ? 0 : j - 1; if (j >= lw.size()) j = lw.size() - 1;
+    return log((1.0 - SEG_UNIF) * exp(lw[j] - lwMax) / lwSum / (bp[j + 1] - bp[j]) + SEG_UNIF / (hi - lo));
+}
+double Chain::drawSeg(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double lo, double hi) {
+    if (rng.u() < SEG_UNIF) return lo + rng.u() * (hi - lo);
+    double r = rng.u() * lwSum, c = 0; size_t j = 0;
+    for (; j + 1 < lw.size(); j++) { c += exp(lw[j] - lwMax); if (r < c) break; }
+    return bp[j] + rng.u() * (bp[j + 1] - bp[j]);
+}
+// segment breakpoints: every branch end and fossil age strictly inside (lo, hi), plus the extra cut points, plus lo and hi
+static void breakpoints(const vector<double> &exA, const vector<double> &foA, const vector<double> &extra, double lo, double hi, vector<double> &bp) {
+    bp.clear(); bp.push_back(lo); bp.push_back(hi);
+    for (const vector<double> *v : {&exA, &foA}) for (auto it = upper_bound(v->begin(), v->end(), lo); it != v->end() && *it < hi; ++it) bp.push_back(*it);
+    for (double x : extra) if (x > lo && x < hi) bp.push_back(x);
+    sort(bp.begin(), bp.end()); bp.erase(unique(bp.begin(), bp.end()), bp.end());
+}
+
+bool Chain::moveShiftData() {
+    // one estimated time T_k, proposed from the guide inside its allowed range (window, neighbours); with probability 1/2 the psi of
+    // its two intervals is also proposed from Gamma(beta n + 1, beta L + 10) given the new time (only when psi varies and is free)
+    if (nEst == 0) return false;
+    int k = estIdx[rng.below(nEst)]; lastShift = k;
+    double lo = shLo[k], hi = shHi[k];
+    if (k > 0) lo = max(lo, shiftT[k - 1]);
+    if (k + 1 < nShift) hi = min(hi, shiftT[k + 1]);
+    if (!(hi > lo)) return false;
+    double A_ = k > 0 ? shiftT[k - 1] : 0.0, B_ = k + 1 < nShift ? shiftT[k + 1] : INFINITY;
+    buildExposure();
+    vector<double> bp; breakpoints(exA, foA, {}, lo, hi, bp);
+    vector<double> lw(bp.size() - 1); double lwMax = -INFINITY;
+    for (size_t j = 0; j + 1 < bp.size(); j++) { double mid = 0.5 * (bp[j] + bp[j + 1]); lw[j] = log(bp[j + 1] - bp[j]) + scoreInt(A_, mid) + scoreInt(mid, B_); lwMax = max(lwMax, lw[j]); }
+    double lwSum = 0; for (double x : lw) lwSum += exp(x - lwMax);
+    double oldT = shiftT[k], newT = drawSeg(bp, lw, lwMax, lwSum, lo, hi);
+    if (!(newT > lo && newT < hi)) return false;
+    double lq = lnSegQ(bp, lw, lwMax, lwSum, oldT, lo, hi) - lnSegQ(bp, lw, lwMax, lwSum, newT, lo, hi), dH = 0;
+    bool rp = redrawPsi() && rng.u() < 0.5;
+    double o0 = psiV[k], o1 = psiV[k + 1];
+    if (rp) {
+        double n0 = drawPsi(A_, newT), n1 = drawPsi(newT, B_);
+        lq += lnQpsi(A_, oldT, o0) + lnQpsi(oldT, B_, o1) - lnQpsi(A_, newT, n0) - lnQpsi(newT, B_, n1);
+        dH = -10.0 * (n0 + n1 - o0 - o1); psiV[k] = n0; psiV[k + 1] = n1;
+    }
+    Pn.T[k] = newT; Pn.set(lamV, muV, psiV, rho);
+    double nF = lnFBDFull(Pn);
+    bool ok = log(rng.u()) < betaF * (nF - lnFBD) + dH + lq;
+    if (ok) { swap(P, Pn); shiftT[k] = newT; lnFBD = nF; lnHyper += dH; }
+    else { psiV[k] = o0; psiV[k + 1] = o1; }
+    Pn.T = P.T;
+    return ok;
+}
+
+bool Chain::moveRelocate() {
+    // free:K (K >= 2): remove one time T_k (its two intervals merge and keep the younger interval's rates; the older interval's rates
+    // are carried) and insert a time anywhere on the window, proposed from the guide (gain of splitting the interval it falls in);
+    // the interval it splits keeps its rates for the younger part and the carried rates go to the older part. The rates are permuted,
+    // not changed, so the move is its own reverse with Jacobian 1. With probability 1/2 the psi of the intervals next to the new
+    // time and of the interval holding the old time is also proposed from its Gamma guide (reverse: the same intervals of the old state).
+    if (estMode != 2 || nShift < 2) return false;
+    const int Kk = nShift; int k = rng.below(Kk); lastShift = k;
+    const double wLo = shLo[0], wHi = shHi[0];
+    vector<double> S; for (int i = 0; i < Kk; i++) if (i != k) S.push_back(shiftT[i]);
+    auto bnd = [](const vector<double> &T, int i, double &a, double &b) { a = i > 0 ? T[i - 1] : 0.0; b = i < (int)T.size() ? T[i] : INFINITY; };
+    auto intOf = [](const vector<double> &T, double t) { int i = 0; while (i < (int)T.size() && t >= T[i]) i++; return i; };
+    buildExposure();
+    vector<double> bp; breakpoints(exA, foA, S, wLo, wHi, bp);
+    vector<double> lw(bp.size() - 1); double lwMax = -INFINITY;
+    for (size_t j = 0; j + 1 < bp.size(); j++) {
+        double mid = 0.5 * (bp[j] + bp[j + 1]), a, b; bnd(S, intOf(S, mid), a, b);
+        lw[j] = log(bp[j + 1] - bp[j]) + scoreInt(a, mid) + scoreInt(mid, b) - scoreInt(a, b); lwMax = max(lwMax, lw[j]);
+    }
+    double lwSum = 0; for (double x : lw) lwSum += exp(x - lwMax);
+    double oldT = shiftT[k], newT = drawSeg(bp, lw, lwMax, lwSum, wLo, wHi);
+    if (!(newT > wLo && newT < wHi)) return false;
+    for (double x : S) if (x == newT) return false;
+    double lq = lnSegQ(bp, lw, lwMax, lwSum, oldT, wLo, wHi) - lnSegQ(bp, lw, lwMax, lwSum, newT, wLo, wHi);
+    int jn = intOf(S, newT);
+    vector<double> T2 = S; T2.insert(T2.begin() + jn, newT);
+    vector<double> oL = lamV, oM = muV, oP = psiV;
+    for (int w = 0; w < 3; w++) { vector<double> &V = rateVec(w); double c = V[k + 1]; V.erase(V.begin() + k + 1); V.insert(V.begin() + jn + 1, c); }
+    double dH = 0;
+    if (redrawPsi() && rng.u() < 0.5) {
+        vector<int> nu = {jn, jn + 1, intOf(T2, oldT)}, ol = {k, k + 1, intOf(shiftT, newT)};
+        sort(nu.begin(), nu.end()); nu.erase(unique(nu.begin(), nu.end()), nu.end());
+        sort(ol.begin(), ol.end()); ol.erase(unique(ol.begin(), ol.end()), ol.end());
+        for (int i : ol) { double a, b; bnd(shiftT, i, a, b); lq += lnQpsi(a, b, oP[i]); }
+        for (int i : nu) { double a, b; bnd(T2, i, a, b); double p = drawPsi(a, b); lq -= lnQpsi(a, b, p); psiV[i] = p; }
+        // the psi values not redrawn are a permutation of the old ones, so the prior changes only through the redrawn ones; the
+        // redrawn sets have the same size (both are {the two intervals at the moved time} + {the interval holding the other time})
+        double sOld = 0, sNew = 0; for (int i = 0; i <= Kk; i++) { sOld += oP[i]; sNew += psiV[i]; } dH = -10.0 * (sNew - sOld);
+    }
+    Pn.T = T2; Pn.set(lamV, muV, psiV, rho);
+    double nF = lnFBDFull(Pn);
+    bool ok = log(rng.u()) < betaF * (nF - lnFBD) + dH + lq;
+    if (ok) { swap(P, Pn); shiftT = T2; lnFBD = nF; lnHyper += dH; }
+    else { lamV = oL; muV = oM; psiV = oP; }
+    Pn.T = P.T;
+    return ok;
+}
+
 // rate-shift specification: "" (none); fixed ages "T1,T2,..."; windows "lo:hi,..." (a time estimated in each, plain numbers stay fixed);
 // "free:K" (K ordered times on --shift-window lo,hi, default 0 to the oldest fossil's minimum age); "mass-extinctions" (preset ages).
 void Chain::parseShifts(const string &spec0, const vector<double> &inputT) {
@@ -962,7 +1127,11 @@ void Chain::setupMoves() {
     if (hasClock) { weights[M_RATE] = K; weights[M_RATESCALE_JOINT] = 3; weights[M_RATESCALE_ALL] = 2; weights[M_MEAN] = 5; if (clk > 0) weights[M_SIGMA] = 5; }
     if (!opt.fixFbd) { weights[M_LAMBDA] = 3 * nFree(0); weights[M_MU] = 3 * nFree(1); weights[M_PSI] = 3 * nFree(2); weights[M_UPDOWN] = 2 * nUD(); } // per free rate, as for one interval
     if (!opt.fixFbd && nEst > 0) weights[M_SHIFT] = 5.0 * nEst;   // estimated shift times
+    if (!opt.fixFbd && nEst > 0 && vary[2]) weights[M_SHIFTD] = 5.0 * nEst;  // data-guided time (and psi) proposal (its guide is the psi part)
     for (int i = 0; i < N_MOVES; i++) if (opt.noMoves.find(MOVE_NAMES[i]) != string::npos) weights[i] = 0.0;
+    // relocation permutes the rates of the intervals, so it needs every rate free (and all times estimated on one window)
+    if (!opt.fixFbd && estMode == 2 && nShift >= 2 && weights[M_LAMBDA] > 0 && weights[M_MU] > 0 && weights[M_PSI] > 0 && opt.noMoves.find(MOVE_NAMES[M_RELOC]) == string::npos)
+        weights[M_RELOC] = 5.0 * nEst;
     cum.resize(N_MOVES); totalW = 0; for (int i = 0; i < N_MOVES; i++) { totalW += weights[i]; cum[i] = totalW; }
 }
 
@@ -1023,6 +1192,13 @@ void Chain::validate() {
     if (fabs(a - lnFBD) > 1e-6) { char b[300]; snprintf(b, 300, "lnFBD cache %.12g vs full %.12g", lnFBD, a); die(b); }
     if (fabs(r - lnRoot) > 1e-6) die("lnRoot cache");
     if (fabs(lnHyper - lnHyperFull()) > 1e-6) die("lnHyper cache");
+    if (nShift > 0) { // the cached FBD quantities must match the current shift times and rates
+        if (P.T != shiftT) die("cached shift times differ from the current ones");
+        for (int k = 1; k < nShift; k++) if (!(shiftT[k] > shiftT[k - 1])) die("shift times not increasing");
+        for (int k = 0; k < nShift; k++) if (shiftT[k] < shLo[k] || shiftT[k] > shHi[k]) die("shift time outside its window");
+        SkyFBD Q = P; Q.set(lamV, muV, psiV, rho); double q = lnFBDFull(Q);
+        if (fabs(q - lnFBD) > 1e-6) { char b[300]; snprintf(b, 300, "lnFBD of current rates and times %.12g vs cache %.12g", q, lnFBD); die(b); }
+    }
     if (P.T != shiftT || Pn.T != shiftT) die("shift time cache");
     for (int k = 0; k < nShift; k++) if (shiftT[k] < shLo[k] || shiftT[k] > shHi[k] || (k && !(shiftT[k] > shiftT[k - 1]))) die("shift time outside its window or out of order");
     if (hasClock && fabs(rateLnPrior() - lnRatePrior) > 1e-6) die("rate prior cache");
@@ -1130,6 +1306,7 @@ void Chain::saveCheckpoint(const string &path) const {
             if (nEst > 0) {
                 o << "SKYT"; for (double t : shiftT) o << ' ' << t; o << ' ' << att[M_SHIFT] << ' ' << acc[M_SHIFT] << ' ' << lastShift << '\n';
                 for (const Tune &t : tSh) o << t.val << ' ' << t.att << ' ' << t.acc << ' ' << t.totalAtt << ' ' << t.totalAcc << ' ' << t.cycles << '\n';
+                o << "SKYM " << att[M_SHIFTD] << ' ' << acc[M_SHIFTD] << ' ' << att[M_RELOC] << ' ' << acc[M_RELOC] << '\n';
             }
         }
         o << "END\n";
@@ -1161,6 +1338,7 @@ void Chain::loadCheckpoint(const string &path) {
             for (double &t : shiftT) in >> t; in >> att[M_SHIFT] >> acc[M_SHIFT] >> lastShift;
             for (Tune &t : tSh) in >> t.val >> t.att >> t.acc >> t.totalAtt >> t.totalAcc >> t.cycles;
             P.T = Pn.T = shiftT; in >> e;
+            if (e == "SKYM") { in >> att[M_SHIFTD] >> acc[M_SHIFTD] >> att[M_RELOC] >> acc[M_RELOC] >> e; }
         } else if (nEst > 0) die("checkpoint has no estimated shift times");
     } else if (e == "SKY") die("checkpoint was written with rate shifts; give the same rate_shifts");
     if (e != "END") die("truncated checkpoint");
@@ -1220,7 +1398,7 @@ void Chain::run() {
                 case M_REGRAFT_L: ok = moveRegraft(true); break; case M_REGRAFT_G: ok = moveRegraft(false); break; case M_COLLEXP: ok = moveCollapseExpand(); break;
                 case M_ROOT: ok = moveRoot(false); break; case M_ROOTC: ok = moveRoot(true); break; case M_ORIGIN: ok = moveOrigin(); break;
                 case M_RATE: ok = moveRate(); break; case M_RATESCALE_JOINT: ok = moveJoint(); break; case M_RATESCALE_ALL: ok = moveVector(); break; case M_MEAN: ok = moveMean(); break; case M_SIGMA: ok = moveSigma(); break;
-                case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break;
+                case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break; case M_SHIFTD: ok = moveShiftData(); break; case M_RELOC: ok = moveRelocate(); break;
             }
             att[mv]++; if (ok) acc[mv]++;
             tuneHit(mv, ok);
@@ -1243,7 +1421,7 @@ void Chain::run() {
             case M_REGRAFT_L: ok = moveRegraft(true); break; case M_REGRAFT_G: ok = moveRegraft(false); break; case M_COLLEXP: ok = moveCollapseExpand(); break;
             case M_ROOT: ok = moveRoot(false); break; case M_ROOTC: ok = moveRoot(true); break; case M_ORIGIN: ok = moveOrigin(); break;
             case M_RATE: ok = moveRate(); break; case M_RATESCALE_JOINT: ok = moveJoint(); break; case M_RATESCALE_ALL: ok = moveVector(); break; case M_MEAN: ok = moveMean(); break; case M_SIGMA: ok = moveSigma(); break;
-            case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break;
+            case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break; case M_SHIFTD: ok = moveShiftData(); break; case M_RELOC: ok = moveRelocate(); break;
         }
         att[mv]++; if (ok) acc[mv]++;
         if (opt.checkPerStep || (opt.check && it % 1000 == 0)) validate();
@@ -1278,7 +1456,7 @@ bool Chain::step(int mv) {
         case M_REGRAFT_L: return moveRegraft(true); case M_REGRAFT_G: return moveRegraft(false); case M_COLLEXP: return moveCollapseExpand();
         case M_ROOT: return moveRoot(false); case M_ROOTC: return moveRoot(true); case M_ORIGIN: return moveOrigin();
         case M_RATE: return moveRate(); case M_RATESCALE_JOINT: return moveJoint(); case M_RATESCALE_ALL: return moveVector(); case M_MEAN: return moveMean(); case M_SIGMA: return moveSigma();
-        case M_LAMBDA: return moveFBDScale(0); case M_MU: return moveFBDScale(1); case M_PSI: return moveFBDScale(2); case M_UPDOWN: return moveUpDown(); case M_SHIFT: return moveShift();
+        case M_LAMBDA: return moveFBDScale(0); case M_MU: return moveFBDScale(1); case M_PSI: return moveFBDScale(2); case M_UPDOWN: return moveUpDown(); case M_SHIFT: return moveShift(); case M_SHIFTD: return moveShiftData(); case M_RELOC: return moveRelocate();
     }
     return false;
 }
@@ -1340,12 +1518,205 @@ void Chain::runSS() {
     summary();
 }
 
+// ---- heated chains: Metropolis-coupled MCMC (Geyer 1991; Altekar et al. 2004) --------------------------------------------------
+// K copies of the chain run side by side. Copy r (rank r = 0 cold, ..., K-1 hottest) targets the posterior with the FBD density
+// (--heat-on fbd, the default) or the FBD density and the phylogram terms (--heat-on all) raised to the power h_r = H^(r/(K-1)),
+// H = --hottest; the priors are not heated. Each copy has its own random-number stream. After every --swap-every proposals of each
+// copy, one pair of neighbouring ranks (r, r+1) is chosen at random and their states swapped with probability
+// min(1, exp((h_r - h_{r+1}) (X_{r+1} - X_r))), X = the heated log density at power 1 (b_F lnFBD [+ b_D lnData], b = stepping-stone
+// powers, 1 outside the stepping-stone). The swap exchanges the heats between the copies (same as exchanging states). Only the cold
+// copy is logged, so the output is a sample of the posterior. Results do not depend on --threads (one thread per copy by default).
+struct Heated {
+    Options o; int Kc; vector<unique_ptr<Chain>> C; vector<double> h; vector<int> objAt, rankOf; RNG srng;
+    vector<long> swAtt, swAcc, coldTime; double baseF = 1.0, baseD = 1.0; bool all = false;
+    int nThr = 1; vector<thread> th; mutex mtx; condition_variable cvGo, cvDone; long gen = 0; int done = 0; bool stop = false;
+    long blockN = 0; bool blockTune = false;
+    explicit Heated(const Options &o_) : o(o_), Kc(o_.heated), srng(o_.seed * 0x9E3779B97F4A7C15ULL + 12345) {
+        if (o.heatOn != "fbd" && o.heatOn != "all") die("--heat-on: fbd or all");
+        if (!(o.hottest > 0 && o.hottest < 1)) die("--hottest must be between 0 and 1");
+        if (o.swapEvery <= 0) die("--swap-every must be positive");
+        if (!o.dumpFile.empty()) die("--dump is not available with --heated");
+        all = o.heatOn == "all";
+        C.emplace_back(new Chain(o)); C[0]->read(o.input); C[0]->init();
+        if (C[0]->P.off && !all) die("--heated with --no-fbd needs --heat-on all");
+        for (int i = 1; i < Kc; i++) { C.emplace_back(new Chain(*C[0])); C[i]->rng = RNG(o.seed + 0x5851F42D4C957F2DULL * (uint64_t)i); }
+        h.resize(Kc); for (int r = 0; r < Kc; r++) h[r] = pow(o.hottest, (double)r / (Kc - 1));
+        objAt.resize(Kc); rankOf.resize(Kc); for (int i = 0; i < Kc; i++) objAt[i] = rankOf[i] = i;
+        swAtt.assign(Kc - 1, 0); swAcc.assign(Kc - 1, 0); coldTime.assign(Kc, 0);
+        nThr = o.threads > 0 ? min(o.threads, Kc) : Kc;
+        for (int t = 1; t < nThr; t++) th.emplace_back([this, t] { worker(t); });
+    }
+    ~Heated() { { lock_guard<mutex> l(mtx); stop = true; gen++; } cvGo.notify_all(); for (auto &t : th) t.join(); }
+    Chain &cold() { return *C[objAt[0]]; }
+    void applyPowers() { for (int i = 0; i < Kc; i++) { double hh = h[rankOf[i]]; C[i]->betaF = baseF * hh; C[i]->beta = all ? baseD * hh : baseD; } }
+    double X(const Chain &c) const { return baseF * c.lnFBD + (all ? baseD * c.lnData : 0.0); }
+    void runBlock(int t) {
+        for (int i = t; i < Kc; i += nThr) {
+            Chain &c = *C[i];
+            for (long g = 0; g < blockN; g++) {
+                int mv = c.pickMove(); bool ok = c.step(mv);
+                if (blockTune) c.tuneHit(mv, ok); else { c.att[mv]++; if (ok) c.acc[mv]++; }
+                if (c.opt.checkPerStep) c.validate();
+            }
+        }
+    }
+    void worker(int t) {
+        long seen = 0;
+        for (;;) {
+            { unique_lock<mutex> l(mtx); cvGo.wait(l, [&] { return gen != seen; }); seen = gen; if (stop) return; }
+            runBlock(t);
+            { lock_guard<mutex> l(mtx); done++; } cvDone.notify_one();
+        }
+    }
+    void advance(long n, bool tune) {   // every copy n proposals (in parallel), then one swap attempt
+        blockN = n; blockTune = tune;
+        if (nThr > 1) { { lock_guard<mutex> l(mtx); done = 0; gen++; } cvGo.notify_all(); }
+        runBlock(0);
+        if (nThr > 1) { unique_lock<mutex> l(mtx); cvDone.wait(l, [&] { return done == nThr - 1; }); }
+        int r = srng.below(Kc - 1); int a = objAt[r], b = objAt[r + 1];
+        double lr = (h[r] - h[r + 1]) * (X(*C[b]) - X(*C[a]));
+        swAtt[r]++;
+        if (log(srng.u()) < lr) { swAcc[r]++; objAt[r] = b; objAt[r + 1] = a; rankOf[a] = r + 1; rankOf[b] = r; applyPowers(); }
+        coldTime[objAt[0]]++;
+    }
+    void need(long x, const char *what) { if (x % o.swapEvery) die(string(what) + " must be a multiple of --swap-every (" + to_string(o.swapEvery) + ")"); }
+    void report() {
+        printf("HEATED CHAINS: %d, powers", Kc); for (double x : h) printf(" %.4g", x); printf(" (heated: %s); swap acceptance by neighbouring ranks:", all ? "FBD and data" : "FBD");
+        for (int r = 0; r + 1 < Kc; r++) printf(" %d-%d %.3f", r, r + 1, swAtt[r] ? (double)swAcc[r] / swAtt[r] : 0.0);
+        long tot = 0; for (long c : coldTime) tot += c; printf("; share of time each copy was cold:"); for (long c : coldTime) printf(" %.3f", tot ? (double)c / tot : 0.0); printf("\n");
+    }
+    string ckp(int i) const { return o.prefix + (i ? ".c" + to_string(i) : string("")) + ".ckp"; }
+    void saveAll() {
+        for (int i = 0; i < Kc; i++) C[i]->saveCheckpoint(ckp(i));
+        string p = o.prefix + ".mc3", tmp = p + ".tmp";
+        { ofstream f(tmp); f << setprecision(17) << Kc << '\n'; for (int i = 0; i < Kc; i++) f << rankOf[i] << ' '; f << '\n';
+          for (int r = 0; r + 1 < Kc; r++) f << swAtt[r] << ' ' << swAcc[r] << ' '; f << '\n'; for (long c : coldTime) f << c << ' '; f << '\n' << srng.e << '\n'; }
+        rename(tmp.c_str(), p.c_str());
+    }
+    void loadAll() {
+        for (int i = 0; i < Kc; i++) C[i]->loadCheckpoint(ckp(i));
+        ifstream f(o.prefix + ".mc3"); if (!f) die("cannot read " + o.prefix + ".mc3"); int k; f >> k; if (k != Kc) die("checkpoint was written with another --heated");
+        for (int i = 0; i < Kc; i++) { f >> rankOf[i]; objAt[rankOf[i]] = i; }
+        for (int r = 0; r + 1 < Kc; r++) f >> swAtt[r] >> swAcc[r]; for (long &c : coldTime) f >> c; f >> srng.e;
+        if (!f) die("truncated " + o.prefix + ".mc3");
+    }
+    void burn(long n) {
+        need(n, "--burnin"); applyPowers();
+        for (auto &c : C) c->tuning = true;
+        for (long b = 0; b < n; b += o.swapEvery) advance(o.swapEvery, true);
+        for (auto &c : C) { c->tuning = false; fill(c->att.begin(), c->att.end(), 0L); fill(c->acc.begin(), c->acc.end(), 0L); c->recomputeAll(); }
+    }
+    void run() {
+        string logp = o.prefix + ".log", tp = o.prefix + ".trees";
+        for (long x : {o.gens, o.printEvery, o.treeEvery, o.ckpEvery}) if (x > 0) need(x, "--gens, --print, --tree-print and --checkpoint");
+        FILE *lf, *tf;
+        if (o.resume) {
+            loadAll();
+            long iter = C[0]->iter;
+            for (const string &p : {logp, tp}) {
+                ifstream in(p); string line; vector<string> keep; bool hdr = true;
+                while (getline(in, line)) { if (hdr) { keep.push_back(line); hdr = false; continue; } if (line.empty()) continue; if (atol(line.c_str()) <= iter) keep.push_back(line); }
+                in.close(); ofstream of(p); for (auto &l : keep) of << l << "\n";
+            }
+            lf = fopen(logp.c_str(), "a"); tf = fopen(tp.c_str(), "a");
+            printf("RESUME from iteration %ld (%s)\n", iter, nowStr().c_str());
+        } else { lf = fopen(logp.c_str(), "w"); tf = fopen(tp.c_str(), "w"); C[0]->writeHeader(lf, tf); }
+        if (!lf || !tf) die("cannot open output");
+        applyPowers();
+        Chain &c0 = *C[0];
+        printf("ffbd: taxa %d (extant %d, fossils %d), mode %s, cond %s, data %d, rho %g, moves total weight %g\n", c0.N, c0.n, c0.mF, c0.mode.c_str(), c0.cond.c_str(), (int)c0.useData, c0.rho, c0.totalW);
+        printf("heated chains: %d copies, powers", Kc); for (double x : h) printf(" %.4g", x); printf(" on the %s, swap every %ld proposals, %d threads\n", all ? "FBD density and phylogram terms" : "FBD density", o.swapEvery, nThr);
+        if (o.check) for (auto &c : C) c->validate();
+        auto t0 = chrono::steady_clock::now();
+        if (!o.resume) { if (o.burnin > 0) { burn(o.burnin); for (auto &c : C) c->burnDone = o.burnin; Chain &cc = cold();
+                printf("BURNIN done (%ld proposals per copy), cold lnPost %.6f\n", o.burnin, cc.lnFBD + cc.lnRoot + cc.lnHyper + cc.lnRatePrior + cc.lnData + cc.lnWin); }
+            cold().writeLog(lf); cold().writeTree(tf); }
+        for (long it = C[0]->iter; it < o.gens; ) {
+            advance(o.swapEvery, false); it += o.swapEvery; for (auto &c : C) c->iter = it;
+            if (o.check && it % 1000 == 0) for (auto &c : C) c->validate();
+            if (o.printEvery > 0 && it % o.printEvery == 0) cold().writeLog(lf);
+            if (o.treeEvery > 0 && it % o.treeEvery == 0) { cold().writeTree(tf); fflush(tf); fflush(lf); }
+            if (o.ckpEvery > 0 && it % o.ckpEvery == 0) { fflush(lf); fflush(tf); saveAll(); }
+            if (it % 5000000 == 0) for (auto &c : C) {
+                double before = c->lnFBD + c->lnData + c->lnRatePrior + c->lnRoot + c->lnHyper; c->recomputeAll();
+                double after = c->lnFBD + c->lnData + c->lnRatePrior + c->lnRoot + c->lnHyper;
+                if (fabs(after - before) > 1e-3) fprintf(stderr, "WARNING drift %.3g at %ld\n", after - before, it);
+            }
+        }
+        fclose(lf); fclose(tf); saveAll();
+        printf("RUN done: %ld generations per copy, s = %.3f\n", o.gens, chrono::duration<double>(chrono::steady_clock::now() - t0).count());
+        report(); cold().summary();
+        Chain &cc = cold(); printf("FINAL lnPost %.6f\n", cc.lnFBD + cc.lnRoot + cc.lnHyper + cc.lnRatePrior + cc.lnData + cc.lnWin);
+    }
+    void runSS() {   // stepping-stone (Chain::runSS) with the cold copy sampled; the stone's power multiplies the heats
+        Chain &c0 = *C[0];
+        const bool pF = o.ssPower == "fbd";
+        if (o.ssPower != "fbd" && o.ssPower != "data") die("--ss-power: data or fbd");
+        if (!pF && (!c0.useData || c0.K == 0)) die("--ss needs mode fast with data");
+        if (pF && c0.P.off) die("--ss-power fbd with --no-fbd");
+        if (!pF && !all) die("--ss-power data with --heated needs --heat-on all (the stepping-stone power is on the phylogram terms)");
+        need(o.ssGens, "--ss-gens"); need(o.ssEvery, "--ss-every"); need(o.ssBurn, "--ss-burn");
+        const int KS = o.ssStones; const char *cn[] = {"exp", "ln", "gam", "igr", "acln"};
+        vector<double> pw(KS + 1); for (int i = 0; i <= KS; i++) pw[i] = pow((double)i / KS, 1.0 / o.ssAlpha);
+        FILE *pf = fopen((o.prefix + ".pp").c_str(), "w"); if (!pf) die("cannot open output");
+        fprintf(pf, pF ? "stone\tpower\titeration\tlnFBD\tlnData\n" : "stone\tpower\titeration\tlikelihood\tprior_clock\n");
+        printf("ffbd ss: taxa %d (extant %d, fossils %d), clock %s, hyper prior rate %g, %d+1 powers (alpha %g), %ld proposals per power after %ld burn-in, sample every %ld\n",
+               c0.N, c0.n, c0.mF, cn[c0.clk], c0.hyperRate, KS, o.ssAlpha, o.ssGens, o.ssBurn, o.ssEvery);
+        printf("heated chains: %d copies, powers", Kc); for (double x : h) printf(" %.4g", x); printf(" (times the stone's power) on the %s, swap every %ld, %d threads\n", all ? "FBD density and phylogram terms" : "FBD density", o.swapEvery, nThr);
+        auto t0 = chrono::steady_clock::now();
+        baseF = 1.0; baseD = 1.0; if (o.burnin > 0) burn(o.burnin);
+        vector<vector<double>> L(KS + 1); long it = 0;
+        for (int i = KS; i >= 0; i--) {
+            if (pF) baseF = pw[i]; else baseD = pw[i];
+            applyPowers();
+            for (auto &c : C) c->tuning = true;
+            for (long b = 0; b < o.ssBurn; b += o.swapEvery) advance(o.swapEvery, true);
+            for (auto &c : C) c->tuning = false;
+            for (long g = o.swapEvery; g <= o.ssGens; g += o.swapEvery) {
+                advance(o.swapEvery, false); it += o.swapEvery;
+                if (g % o.ssEvery == 0) {
+                    Chain &cc = cold();
+                    if (pF) { L[i].push_back(cc.lnFBD); fprintf(pf, "%d\t%.10g\t%ld\t%.10g\t%.10g\n", i, baseF, it, cc.lnFBD, cc.lnData); }
+                    else { L[i].push_back(cc.lnData); fprintf(pf, "%d\t%.10g\t%ld\t%.10g\t%.10g\n", i, baseD, it, cc.lnData, cc.lnRatePrior); }
+                }
+                if (it % 5000000 == 0) for (auto &c : C) c->recomputeAll();
+            }
+            if (o.check) for (auto &c : C) c->validate();
+            double mL = accumulate(L[i].begin(), L[i].end(), 0.0) / L[i].size();
+            printf("power %3d  beta %.6g  mean lnL %.6f  (%.0f s)\n", i, pF ? baseF : baseD, mL, chrono::duration<double>(chrono::steady_clock::now() - t0).count()); fflush(stdout);
+        }
+        fclose(pf);
+        double ss = 0, ps = 0;
+        for (int i = 1; i <= KS; i++) {
+            double d = pw[i] - pw[i - 1], mx = -INFINITY, acc_ = 0;
+            for (double l : L[i - 1]) mx = max(mx, d * l);
+            for (double l : L[i - 1]) acc_ += exp(d * l - mx);
+            ss += mx + log(acc_ / L[i - 1].size());
+            double m1 = accumulate(L[i].begin(), L[i].end(), 0.0) / L[i].size(), m0 = accumulate(L[i - 1].begin(), L[i - 1].end(), 0.0) / L[i - 1].size();
+            ps += d * 0.5 * (m1 + m0);
+        }
+        FILE *mf = fopen((o.prefix + ".ml.tsv").c_str(), "w");
+        if (pF) fprintf(mf, "clock\thyper_rate\tpowers\talpha\tgens_per_power\tseed\tstepping_stone\tpath_sampling\tpower_on\tshifts\theated\n%s\t%g\t%d\t%g\t%ld\t%llu\t%.6f\t%.6f\tfbd\t%s\t%d\n",
+                        cn[c0.clk], c0.hyperRate, KS + 1, o.ssAlpha, o.ssGens, (unsigned long long)o.seed, ss, ps, c0.nShift == 0 ? "none" : (o.rateShifts.empty() ? "input" : o.rateShifts.c_str()), Kc);
+        else fprintf(mf, "clock\thyper_rate\tpowers\talpha\tgens_per_power\tseed\tstepping_stone\tpath_sampling\theated\n%s\t%g\t%d\t%g\t%ld\t%llu\t%.6f\t%.6f\t%d\n",
+                cn[c0.clk], c0.hyperRate, KS + 1, o.ssAlpha, o.ssGens, (unsigned long long)o.seed, ss, ps, Kc);
+        fclose(mf);
+        printf("ML stepping-stone %.6f path %.6f (%.0f s)\n", ss, ps, chrono::duration<double>(chrono::steady_clock::now() - t0).count());
+        report(); cold().summary();
+    }
+};
+static void runHeated(const Options &o) {
+    Heated H(o);
+    if (o.ssStones > 0) { if (o.ssGens <= 0 || o.ssEvery <= 0) die("--ss needs --ss-gens and --ss-every"); H.runSS(); } else H.run();
+}
+
 static void usage() {
     cerr << "usage: ffbd run INPUT --prefix P --seed S --gens G [--print N] [--tree-print N] [--checkpoint N] [--burnin N] [--mode fast|control] [--no-data] [--resume] [--check|--check-every-step] [--rb-sa-move] [--log-rates] [--dump FILE --dump-every N]\n"
             "       [--clock exp|ln|gam|igr|acln] [--hyper-rate R] [--init-hyper X]\n"
             "       [--rate-shifts T1,T2,...|none] [--shift-rates lambda,mu,psi]   piecewise-constant FBD rates (override input keywords rate_shifts, shift_rates)\n"
             "       [--rate-shifts free:K [--shift-window lo,hi] | lo:hi,lo:hi,... | mass-extinctions]   estimated shift times, or preset ages\n"
-            "       marginal likelihood: --ss K --ss-gens G [--ss-burn B] [--ss-every E] [--ss-alpha 0.3] [--burnin N] [--ss-power data|fbd]   writes PREFIX.pp, PREFIX.ml.tsv\n";
+            "       marginal likelihood: --ss K --ss-gens G [--ss-burn B] [--ss-every E] [--ss-alpha 0.3] [--burnin N] [--ss-power data|fbd]   writes PREFIX.pp, PREFIX.ml.tsv\n"
+            "       heated chains: --heated K [--hottest 0.3] [--heat-on fbd|all] [--swap-every 1000] [--threads T]   Metropolis-coupled MCMC; the cold chain is logged\n";
     exit(2);
 }
 
@@ -1368,8 +1739,11 @@ int main(int argc, char **argv) {
         else if (a == "--ss-burn") o.ssBurn = stol(val()); else if (a == "--ss-every") o.ssEvery = stol(val());
         else if (a == "--no-fbd") o.noFbd = true; else if (a == "--rate-shifts") o.rateShifts = val(); else if (a == "--shift-rates") o.shiftRates = val();
         else if (a == "--shift-window") o.shiftWindow = val(); else if (a == "--ss-power") o.ssPower = val(); else if (a == "--eval-shifts") o.evalShifts = val();
+        else if (a == "--heated") o.heated = stoi(val()); else if (a == "--hottest") o.hottest = stod(val()); else if (a == "--heat-on") o.heatOn = val();
+        else if (a == "--swap-every") o.swapEvery = stol(val()); else if (a == "--threads") o.threads = stoi(val());
         else usage();
     }
+    if (o.heated > 1 && o.evalShifts.empty()) { runHeated(o); return 0; }
     Chain c(o); c.read(o.input); c.init();
     if (!o.evalShifts.empty()) { // test option: the FBD density of the start tree and rates at each line of shift times (one per interval boundary)
         if (c.nShift == 0) die("--eval-shifts needs --rate-shifts with the same number of shifts");

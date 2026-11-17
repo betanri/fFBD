@@ -163,6 +163,7 @@ Fossils already date the tree, so most analyses need no calibrations. One case w
 | `--ss K --ss-gens G` | Instead of a normal run, estimate the marginal likelihood of the phylogram by stepping-stone sampling with K+1 powers, to compare clock models |
 | `--ss-power fbd` | With `--ss`: put the powers on the FBD density instead, to compare rate models (no shifts, fixed or estimated shifts) |
 | `--rate-shifts SPEC` | Rate shifts: fixed times, `free:K`, windows `lo:hi`, or `mass-extinctions` (The skyline model, below) |
+| `--heated K` | Run K heated copies of the chain and log the cold one, for posteriors with several peaks (Heated chains, below) |
 | `--check` | Check internal consistency while running (slow) |
 
 ## The model
@@ -208,7 +209,8 @@ rate_shifts 66 201.3
 | `60:72,195:207` | One time estimated in each window, prior uniform on the window (windows must not overlap). A plain number in the list stays fixed |
 | `mass-extinctions` | Fixed at the major extinction events younger than the oldest fossil: K-Pg 66.0, end-Triassic 201.4, end-Permian 251.902, end-Devonian 358.9, Late Devonian (Frasnian-Famennian) 371.1, end-Ordovician 443.8 Ma (ICS chart) |
 
-- A time is moved by a sliding window or by a uniform draw between its neighbours (move `shift_time`, weight 5 per estimated time). The log gets `shift_time[1]`, ... (youngest first).
+- Three moves change the times. `shift_time` slides one time or redraws it between its neighbours. `shift_data` proposes a time where the fossils and the tree make a change in fossil sampling likely, and can redraw the fossil-sampling rates of the two intervals with it. `shift_relocate` (`free:K`, K of 2 or more) takes one shift out and puts it back anywhere in the window, so a shift can jump over the others. Each move has weight 5 per estimated time. All are exact Metropolis-Hastings moves. The log gets `shift_time[1]`, ... (youngest first).
+- When fossil sampling may change at the shifts, an estimated shift tends to land on a rich fossil bed, where many fossils date to a short interval, rather than on a change in speciation or extinction. With `shift_rates lambda,mu` fossil sampling stays the same in every interval, so the shifts are about speciation and extinction only.
 - Each extra shift adds an interval with three more rates. Choose the number of shifts by marginal likelihood (below), not by adding shifts until the dates stop changing.
 - Validation: tests 1c and 2d of VALIDATION.md (exact numerical integration, simulation-based calibration, recovery of the number of shifts).
 
@@ -221,6 +223,23 @@ done
 ```
 
 On large trees the FBD density changes steeply near full power, so they need many more powers and longer runs per power than small ones (several hundred powers on thousands of tips). Check that the replicates agree before comparing models.
+
+### Heated chains
+
+On a large tree the posterior of estimated shift times can have several separate peaks, and a single chain can stay on one of them. Two chains with different seeds that disagree on the shift times show this. `--heated K` runs K copies of the chain side by side (Metropolis-coupled MCMC). Copy r targets the posterior with the FBD density raised to the power H^(r/(K-1)), H = `--hottest` (default 0.3), so the hotter copies cross between peaks more easily. Every `--swap-every` proposals two neighbouring copies may swap states. Only the cold copy (power 1) is logged, so the output is a sample of the posterior.
+
+| Option | Meaning |
+|---|---|
+| `--heated K` | Number of copies (2 or more) |
+| `--hottest H` | Power of the hottest copy, between 0 and 1 (default 0.3) |
+| `--heat-on fbd\|all` | Heat the FBD density only (default), or the FBD density and the phylogram |
+| `--swap-every N` | Proposals of each copy between swap attempts (default 1000) |
+| `--threads T` | Threads (default one per copy); the output does not depend on it |
+
+- The end of the run prints the swap acceptance between neighbouring copies. If one pair rarely swaps (below about 0.05), the heats are too far apart: add copies or raise `--hottest`. On a tree of thousands of tips the FBD density is very sharp, so neighbouring copies need powers that differ by about 0.01.
+- Heated chains also work with `--ss` (the stepping-stone power multiplies the heats) and with `--checkpoint` and `--resume`.
+- A run with K copies does K times the work. Use it when two plain chains disagree, and still run two heated chains with different seeds and check that they agree.
+- Validation: test 2e of VALIDATION.md.
 
 ## Validation
 
@@ -266,9 +285,10 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 - **2a.** Small trees, 500 replicates in each of 3 settings, 13 quantities.
 - **2b.** Realistic trees, 500 replicates of 2 to 8,056 living species and up to 15,838 fossils, 9 quantities.
 - **2c.** A 3-species case with an exact answer.
-- **2d.** Rate shifts: simulation-based calibration with estimated shift times (6 settings, 1,000 replicates each), and recovery of the number of shifts by marginal likelihood on 90 simulated trees.
+- **2d.** Rate shifts: simulation-based calibration with estimated shift times (6 settings, 1,000 replicates each), and recovery of the number of shifts by marginal likelihood on 90 simulated trees. Repeated with the new shift-time moves.
+- **2e.** Heated chains: simulation-based calibration (4 settings, 1,000 replicates each, then 2,000 more in each of the 2 settings with the most failures), and heated against plain chains on one data set (20 runs each).
 
-**Answer.** All passed. Testing found and fixed two bugs along the way (a cached rate sum and a checkpoint restart), and all tests were rerun after the fixes.
+**Answer.** All passed. In 4 of the first 9 heated-chain runs one quantity fell below the threshold; a larger repeat with new seeds and the direct comparison with plain chains found no difference (VALIDATION.md, test 2e). Testing found and fixed two bugs along the way (a cached rate sum and a checkpoint restart), and all tests were rerun after the fixes.
 
 ### 3. Does an independent program give the same answer?
 
@@ -401,7 +421,7 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 
 - **Full-DNA FBD in practice.** BEAST2, RevBayes and MrBayes can fit skyline FBD, but comparing no shifts against one, two or three shifts, or against shifts at extinction events, needs a stepping-stone run per model on the DNA: the same cost that limits clock fitting to small clades. Studies therefore keep rates constant or place the shift times by hand. RevBayes 1.3.2 also cannot estimate the shift times themselves (test 1c).
 - **fFBD** fits each rate model on the phylogram of the tree being dated (no shifts, K shifts at times estimated from the data, or shifts at preset extinction events) and keeps the one the data support (`--ss-power fbd`).
-- **What test 2d shows.** On simulated trees of 30 to 120 living species, the marginal likelihood picked no shift on 29 of 30 trees simulated without a shift, and one shift on 27 of 30 simulated with one, with the true shift time inside the 95% interval on 26 of 30. It is conservative: it rarely adds a shift that is not there, and on trees this small it seldom detects a second one.
+- **What test 2d shows.** On simulated trees of 30 to 120 living species, the marginal likelihood picked no shift on 29 of 30 trees simulated without a shift (30 of 30 with the new moves), and one shift on 27 of 30 simulated with one, with the true shift time inside the 95% interval on 26 of 30. It is conservative: it rarely adds a shift that is not there, and on trees this small it seldom detects a second one.
 
 ### Reproducing the tests
 
@@ -413,7 +433,8 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 | 1b | `sky_density_check.py`, `sbc_sky.py` | `skyline_checks.txt` |
 | 1c | `est_grid_check.py`, `est_rb_check.py` (fixed shifts only) | `skyline_estimated_checks.txt` |
 | 2c | `analytic_check.py` | `analytic_check.txt` |
-| 2d | `sbc_sky.py --shifts free:K:lo:hi`, `sim_study.py simulate --shifts` | `skyline_estimated_checks.txt` |
+| 2d | `sbc_sky.py --shifts free:K:lo:hi`, `sim_study.py simulate --shifts` | `skyline_estimated_checks.txt`, `shift_moves_heated_checks.txt` |
+| 2e | `sbc_sky.py --ffbd-extra "--heated 3 ..."` | `shift_moves_heated_checks.txt` |
 | 3a | `make_fixed3.py`, `compare_fixed3.py` | `three_program_prior_A06_A12.txt`, `compare_pilots_summary.txt` |
 | 3b | `compare_runs.py` | `E1_noCE_summary.txt` |
 | 4a, 4c | `branch_scatter.py --ages-only` | `node_ages_full_vs_fast.tsv` |
@@ -448,7 +469,7 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 
 - The topology of living species is fixed within a run; date several trees to cover topological uncertainty.
 - Fossils must fall inside a clade constraint below the root in root-conditioned runs.
-- With rate shifts, the number of shifts is chosen by marginal likelihood across runs, not estimated within one run (no reversible jump). There are no mass extinctions or extra sampling at the shifts. On small trees (30 to 120 living species), two shifts are rarely detected (test 2d).
+- With rate shifts, the number of shifts is chosen by marginal likelihood across runs, not estimated within one run (no reversible jump). On large trees, estimated shift times can have several peaks; check them with two seeds, and use heated chains if the seeds disagree. There are no mass extinctions or extra sampling at the shifts. On small trees (30 to 120 living species), two shifts are rarely detected (test 2d).
 - The result depends on the quality of the branch lengths and their standard errors.
 
 ## Citation and license
