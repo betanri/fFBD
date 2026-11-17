@@ -105,7 +105,7 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Branch lengths and their standard errors | ML branch lengths on the fixed tree from a **partitioned** model, with bootstrap standard errors (see below) |
 | Fossil list | Name, minimum and maximum age |
 | Clade constraints | Which fossils belong in which clades |
-| Crown or stem rules (optional) | Fossils that must sit inside a crown, or on its stem only (see below) |
+| Crown and stem rules (optional) | Where a fossil may sit relative to a crown group: four rules (see below) |
 | Sampling fraction (rho) | Share of living species included |
 | Root age prior | `uniform MIN MAX`, `soft MIN MAX SD P` (soft bounds) or `normal MEAN SD` |
 | Clock model | Chosen by fitting the five clocks on your phylogram (highly recommended; [Choosing the clock](#choosing-the-clock)), then set with `--clock` |
@@ -118,19 +118,27 @@ These go in one text file. `examples/example_input.txt` shows every section: the
 **You do not need a starting tree.** MCMC needs one valid tree to start from: fossils attached, every constraint, crown or stem rule and calibration satisfied. If the input folder has no `initial.nwk`, the converter builds one:
 
 - each fossil goes on the stem of its clade, at its minimum age;
-- crown-rule fossils go inside the crown;
+- crown-rule and daughter-stem fossils go inside the crown, on the stem of its first daughter group;
 - node ages are pushed up wherever a fossil or calibration needs it.
 
 It prints `starting tree built automatically`. `--write-start FILE` saves the tree, and `--auto-start` uses it even when `initial.nwk` exists. The start does not affect the result: from an automatic and from a supplied start, the node ages agree within chain noise (test 6d).
 
 ### Crown and stem rules
 
-A clade constraint says a fossil belongs to a group, and that includes the group's stem. Two optional sections narrow this:
+Every fossil follows one of four rules. The clade constraint alone gives the first; three optional sections narrow it, each for a node X of the living tree:
 
-- `crown K` followed by K lines `fossil node`: the fossil may attach only below that extant node, inside the crown. The crown node must then be at least as old as the fossil.
-- `stem K` followed by K lines `fossil node`: the fossil may not attach below that extant node. Its clade constraint keeps it in the total group, so it sits on the stem.
+| Rule | Where the fossil may attach | Input section | Converter file |
+|---|---|---|---|
+| **Total group** (default) | Anywhere in its clade: on the stem or inside the crown | none (the clade constraint) | none |
+| **Stem** | On the stem of X only, never inside crown X | `stem` | `stem.tsv` |
+| **Crown** | Anywhere inside crown X | `crown` | `crown.tsv` |
+| **Daughter stem** | Inside crown X but in neither daughter crown: on the stem of one of X's two daughter groups | `daughter_stem` | `daughter_stem.tsv` |
 
-`fossil` is the tip index and `node` the extant node index used in the input file. The converter reads them from `crown.tsv` and `stem.tsv` (fossil name, extant node name) in the input folder. The rules only restrict where a fossil can attach; they add no age prior. `examples/example_crown_stem.txt` shows both.
+- **Stem.** The clade constraint keeps the fossil in the total group, so it sits on the stem.
+- **Crown.** Crown X must then be at least as old as the fossil.
+- **Daughter stem.** Use it when a fossil has the features of crown X but none of either daughter group, so it sits near the first split inside X without saying on which side. The daughter groups are the first nodes of the living tree below X on each side (a single living species counts). A fossil may also sit on a side branch of another fossil that hangs from those stems. The rule holds the fossil close to node X, so it acts much like a node calibration: use it only where the evidence rules out both daughter crowns.
+
+Each section is the section name and K, followed by K lines `fossil node`. `fossil` is the tip index and `node` the extant node index (X) used in the input file. The converter reads the files above (fossil name, extant node name) from the input folder. A fossil can have only one rule. The rules only restrict where a fossil can attach; they add no age prior. `examples/example_crown_stem.txt` shows the crown and stem rules, and `examples/bears_daughter_stem.txt` the daughter-stem rule.
 
 ## Main options
 
@@ -343,11 +351,11 @@ The real test clades are Gobiaria (24 living species, 10 fossils) and Protacanth
 **How it was tested.** *Phylogram.*
 
 - **6a. Convergence.** Two independent chains each were run at 1,185 and 2,424 species, with 20 billion proposals each (about 2 hours on one core).
-- **6b. Crown and stem rules.** The optional rules that keep a fossil inside or outside a crown group were compared with unconstrained runs filtered to the same rules.
+- **6b. Crown and stem rules.** The optional rules that keep a fossil inside a crown, on its stem, or on the stem of one of its two daughter groups were compared with unconstrained runs filtered to the same rules.
 - **6c. Speed.** Speed was measured at both tree sizes.
 - **6d. Automatic starting tree.** Starting trees were built automatically for two small clades and for two 1,184-species sets (1,587 and 1,588 fossils, 430 constraints, crown and stem rules, node calibrations). The same analysis was then run from the automatic start and from a supplied one.
 
-**Answer.** The chains converge (effective sample sizes 500 to 800 for the main parameters; the two chains agree on node ages to 0.9% at the median). The rules behave exactly as intended (all quantities within 1.4 standard errors). Every automatic starting tree passes all checks. From the automatic and the supplied start, node ages agree to 0.17 and 0.29% at the median (largest 0.7 and 1.1%), within chain noise. Speed is the same at both sizes, about 2.6 million proposals per second.
+**Answer.** The chains converge (effective sample sizes 500 to 800 for the main parameters; the two chains agree on node ages to 0.9% at the median). The rules behave exactly as intended (all quantities within 1.4 standard errors for the crown and stem rules and 1.7 for the daughter-stem rule). Every automatic starting tree passes all checks. From the automatic and the supplied start, node ages agree to 0.17 and 0.29% at the median (largest 0.7 and 1.1%), within chain noise. Speed is the same at both sizes, about 2.6 million proposals per second.
 
 ### What the validation shows, and what it does not
 
@@ -408,7 +416,7 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 | 5c | `clock_ss.py` (DNA, RevBayes); `ffbd --clock C --ss K` (phylogram); `clock_density_check.py` | `clock_checks.txt`, `clock_fit_results.txt` |
 | 5e | `sim_genes.py`, `sim_genes_summary.py` | `sim_genes_100reps.txt` |
 | 5f | `sim_codons.py`, `young_fix_summary.py`, `codon_test_summary.py` | `young_fix_50reps.txt`, `codon_test_50reps.txt` |
-| 6b | `examples/example_crown_stem.txt` | `crown_stem_test_11seeds.txt`, `regression_previous_release.txt` |
+| 6b | `examples/example_crown_stem.txt`, `examples/bears_daughter_stem.txt`, `rule_filter_check.py` | `crown_stem_test_11seeds.txt`, `daughter_stem_test_11seeds.txt`, `regression_previous_release.txt` |
 | 6d | `ffbd_convert.py --auto-start` | `auto_start_check.txt` |
 | Figures | `validation_figures.py` | `validation/*.png` |
 

@@ -1,13 +1,13 @@
 #!/bin/sh
 # Quick self-test of ffbd (about a minute). Run from the repository root: make test
-# 1. Every clock, on both examples: after every proposal the cached posterior is recomputed from scratch and compared (--check-every-step).
+# 1. Every clock, on three examples (crown, stem and daughter-stem rules included): after every proposal the cached posterior is recomputed from scratch and compared (--check-every-step).
 # 2. Stepping-stone runs end to end and prints a marginal likelihood.
 # 3. The bears example (real data) runs and its root age falls inside the root prior.
 # 4. Estimated shift times (free:2, windows): cache check after every proposal; FBD-power stepping-stone runs.
 set -u
 B=./ffbd; T=$(mktemp -d); fail=0
 [ -x "$B" ] || { echo "build ffbd first (make)"; exit 1; }
-for ex in examples/example_input.txt examples/example_crown_stem.txt; do
+for ex in examples/example_input.txt examples/example_crown_stem.txt examples/bears_daughter_stem.txt; do
   for c in exp ln gam igr acln; do
     out=$($B run "$ex" --prefix "$T/chk" --clock $c --seed 11 --gens 20000 --print 5000 --burnin 5000 --check-every-step 2>&1)
     if echo "$out" | grep -q "ERROR" || ! echo "$out" | grep -q "FINAL"; then echo "FAIL  cache check  $ex  clock $c"; fail=1; else echo "ok    cache check  $ex  clock $c"; fi
