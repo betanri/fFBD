@@ -116,7 +116,7 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 
 ### Branch lengths and their standard errors
 
-fFBD never reads the DNA. For each branch of the fixed tree it reads two numbers:
+fFBD uses the DNA in a step before the dating: the alignment gives each branch of the fixed tree two numbers, and the dating then works from these numbers instead of the alignment's sites:
 
 - **The branch length**: how much the DNA changed along that branch, in substitutions per site, estimated once by maximum likelihood on the fixed tree (IQ-TREE or RAxML).
 - **Its standard error (SE)**: how uncertain that length is.
@@ -309,7 +309,7 @@ fFBD is new code, and it replaces the DNA with a phylogram. Both need to earn tr
 
 ### Three kinds of data
 
-fFBD never reads DNA. Its data are a **phylogram**: the branch lengths of the fixed tree of living species, in substitutions per site, each with a standard error, estimated once from the DNA. Each test is labeled by what it uses:
+fFBD's data are a **phylogram** estimated from the DNA: the branch lengths of the fixed tree of living species, in substitutions per site, each with a standard error from bootstrapping the alignment. The dating works from these numbers, not from the alignment's sites. Each test is labeled by what it uses:
 
 - **No data**: fossils and priors only. This isolates the tree and fossil part of the model, where programs differ most.
 - **Phylogram**: branch lengths and standard errors, estimated from DNA or simulated.
