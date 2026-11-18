@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Simulation-based calibration for ffbd (validation step 2).
 
-  sbc.py run  NREP OUTDIR FFBD FFBD_SIM SEED [--no-data] [--rb-sa-move] [--gens G] [--print P] [--burnin B]
+  sbc.py run  NREP OUTDIR FFBD FFBD_SIM SEED [--no-data] [--rb-sa-move] [--gens G] [--print P] [--burnin B] [--origin] [--fossil-clade]
   sbc.py analyze OUTDIR
 
 For each replicate: ffbd_sim draws (rates, tree, data) exactly from the prior conditional on the tip configuration and
@@ -117,7 +117,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd"); ap.add_argument("nrep", type=int); ap.add_argument("outdir"); ap.add_argument("ffbd"); ap.add_argument("sim"); ap.add_argument("seed", type=int)
     ap.add_argument("--no-data", action="store_true"); ap.add_argument("--rb-sa-move", action="store_true"); ap.add_argument("--gens", type=int, default=1000000); ap.add_argument("--print", dest="printe", type=int, default=5000); ap.add_argument("--burnin", type=int, default=50000); ap.add_argument("--origin", action="store_true")
+    ap.add_argument("--fossil-clade", action="store_true", help="FOSSIL_1 and FOSSIL_3 also form a clade of their own (constraint cl_F13; ffbd_sim FFBD_SIM_FOSSIL_CLADE=1)")
     a = ap.parse_args()
+    if a.fossil_clade: os.environ["FFBD_SIM_FOSSIL_CLADE"] = "1"
     o = pathlib.Path(a.outdir); o.mkdir(parents=True, exist_ok=True)
     random.seed(a.seed)
     ranksf = open(o / "ranks.tsv", "w")

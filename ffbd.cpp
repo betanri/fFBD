@@ -160,11 +160,11 @@ struct Tune {
 };
 
 enum MoveType { M_NODE, M_COUPLED, M_FOSAGE, M_REGRAFT_L, M_REGRAFT_G, M_COLLEXP, M_ROOT, M_ROOTC, M_ORIGIN,
-                M_RATE, M_RATESCALE_JOINT, M_RATESCALE_ALL, M_MEAN, M_SIGMA, M_LAMBDA, M_MU, M_PSI, M_UPDOWN, M_SHIFT, M_SHIFTD, M_RELOC, N_MOVES };
+                M_RATE, M_RATESCALE_JOINT, M_RATESCALE_ALL, M_MEAN, M_SIGMA, M_LAMBDA, M_MU, M_PSI, M_UPDOWN, M_SHIFT, M_SHIFTD, M_RELOC, M_UNIT, N_MOVES };
 static const int N_MOVES_CKP = 18; // moves whose counts the checkpoint stores in its main block (the shift-time move is stored with the shift times)
 static const char *MOVE_NAMES[] = {"node_slide", "node_slide_coupled", "fossil_age", "regraft_local", "regraft_global",
     "collapse_expand", "root_slide", "root_slide_coupled", "origin_slide", "rate_scale", "rates_mean_joint_scale",
-    "rates_vector_scale", "mean_rate_scale", "ucln_sigma_scale", "lambda_scale", "mu_scale", "psi_scale", "lambda_mu_updown", "shift_time", "shift_data", "shift_relocate"};
+    "rates_vector_scale", "mean_rate_scale", "ucln_sigma_scale", "lambda_scale", "mu_scale", "psi_scale", "lambda_mu_updown", "shift_time", "shift_data", "shift_relocate", "regraft_clade"};
 
 struct Options {
     string input, prefix = "ffbd_run";
@@ -307,16 +307,21 @@ public:
     // moves
     bool moveNode(); bool moveCoupled(); bool moveFossilAge(); bool moveRegraft(bool local); bool moveCollapseExpand();
     bool moveRoot(bool coupled); bool moveOrigin(); bool moveRate(); bool moveJoint(); bool moveVector(); bool moveMean(); bool moveSigma();
-    bool moveFBDScale(int which); bool moveUpDown(); bool moveShift(); bool moveShiftData(); bool moveRelocate();
+    bool moveFBDScale(int which); bool moveUpDown(); bool moveShift(); bool moveShiftData(); bool moveRelocate(); bool moveUnit();
+    vector<int> unitCons; vector<vector<int>> unitFossils;   // constraints with fossils only (moved as one clade by regraft_clade), and their fossils
     // data-guided shift proposals (moves shift_data, shift_relocate): exposure (lineage time) and fossil counts of the sampled tree
     vector<double> exA, exC, exN, foA; void buildExposure();
+    vector<pair<double, double>> evBuf; vector<double> evW; vector<char> evHas;   // work space of buildExposure
+    mutable vector<double> lgTab; mutable double lgBeta = NAN;                     // lgamma(betaF k + 1), k = 0..fossils, for the current betaF
+    double lgN(int k) const { if (!(lgBeta == betaF)) { lgTab.resize(N - n + 1); for (int i = 0; i <= N - n; i++) lgTab[i] = lgamma(betaF * i + 1.0); lgBeta = betaF; } return lgTab[k]; }
     double expo(double t) const; int fosBelow(double t) const;
     double scoreInt(double a, double b) const;           // ln of the Poisson-Gamma approximation to the psi part of one interval [a, b)
+    double scoreCnt(int k, double L) const { return lgN(k) - (betaF * k + 1.0) * log(betaF * L + 10.0); }   // scoreInt from the counts
     double lnQpsi(double a, double b, double p) const;  // ln density of the psi proposal Gamma(beta n + 1, beta L + 10) of interval [a, b)
     double drawPsi(double a, double b);
     bool redrawPsi() const { return vary[2] && weights[M_PSI] > 0; }
-    double lnSegQ(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double t, double lo, double hi) const;
-    double drawSeg(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double lo, double hi);
+    double lnSegQ(const vector<double> &bp, const vector<double> &ew, double lwSum, double t, double lo, double hi) const;
+    double drawSeg(const vector<double> &bp, const vector<double> &ew, double lwSum, double lo, double hi);
     void validate();
 
     // output
@@ -479,6 +484,11 @@ void Chain::init() {
         int best = 0; size_t bs = N + 1; for (int k = 1; k <= nCons; k++) if (mem[k][f] && consMembers[k].size() < bs) { best = k; bs = consMembers[k].size(); }
         homeC[f] = best;
         if (best == 0 && !useOrigin) die("root-conditioned model: fossil " + names[f] + " has no constraint below the root (not supported, see README)");
+    }
+    unitCons.clear(); unitFossils.clear();
+    for (int k = 1; k <= nCons; k++) {
+        bool fo = true; for (int v : consMembers[k]) if (v < n) { fo = false; break; }
+        if (fo) { unitCons.push_back(k); unitFossils.push_back(consMembers[k]); }
     }
     // subtree tips for labelling
     vector<vector<int>> kids(nNodes); vector<int> order; order.reserve(nNodes);
@@ -731,6 +741,48 @@ bool Chain::moveRegraft(bool local) {
     return false;
 }
 
+bool Chain::moveUnit() {
+    // regraft_clade: a constraint with fossils only (a clade of fossils, e.g. two species of one fossil genus) is pruned with the node
+    // above it and attached on another edge of its parent constraint's region, as regraft_global does for one fossil: the clade's
+    // root u plays the part of the fossil tip, and the new node age is uniform between max(age of the edge's lower end, age[u]) and
+    // the edge's upper end. Inside the clade nothing changes. Crown, stem and daughter-stem rules of its fossils are checked at the
+    // new edge.
+    if (unitCons.empty()) return false;
+    int q = rng.below((int)unitCons.size()), K = unitCons[q], u = x[K];
+    int p = par[u]; if (p < 0) return false;
+    int s = (c0[p] == u) ? c1[p] : c0[p], g = par[p];
+    if (p == root && !useOrigin) return false;
+    if (s < N && sa[s]) return false;
+    int C = parentCons[K]; double ageU = age[u], oldAgeP = age[p];
+    int A = (C == 0) ? -1 : (x[C] == p ? s : x[C]);
+    int c = pickRegion(C, p, u); if (c < 0) return false;
+    prune(p, s, g);
+    for (int f : unitFossils[q]) {
+        if ((crownOf[f] >= 0 && !belowNode(c, crownOf[f])) || (stemOf[f] >= 0 && belowNode(c, stemOf[f])) ||
+            (dsOf[f] >= 0 && (belowNode(c, dsA[f]) || belowNode(c, dsB[f])))) { attach(p, u, s, oldAgeP); return false; }
+    }
+    double topC = par[c] == -1 ? origin : age[par[c]];
+    double lo = max(age[c], ageU), hi = topC;
+    if (hi <= lo) { attach(p, u, s, oldAgeP); return false; }
+    double newA = lo + rng.u() * (hi - lo);
+    double rangeOld = (par[s] == -1 ? origin : age[par[s]]) - max(age[s], ageU);
+    double dF = P.lnD(newA) - P.lnD(oldAgeP);
+    if (nShift) dF += P.lnLam(newA) - P.lnLam(oldAgeP);
+    if (log(rng.u()) < betaF * dF + log(hi - lo) - log(rangeOld)) {
+        attach(p, u, c, newA);
+        lnFBD += dF;
+        if (C != 0) {
+            int xNew = (c == A) ? p : A;
+            x[C] = xNew;
+            setLabel(p, xNew == p ? parentCons[C] : C);
+            setLabel(A, xNew == A ? parentCons[C] : C);
+        }
+        return true;
+    }
+    attach(p, u, s, oldAgeP);
+    return false;
+}
+
 bool Chain::moveCollapseExpand() {
     if (mF == 0) return false;
     int f = n + rng.below(mF);
@@ -934,15 +986,20 @@ bool Chain::moveShift() {
 // the time is about Gamma(beta n + 1, rate beta L + 10), the psi proposal. The tree is fixed during the move, so the guide is the same
 // function for the forward and the reverse proposal; a uniform component (10%) keeps every time reachable.
 void Chain::buildExposure() {
-    vector<pair<double, double>> ev; ev.reserve(2 * nNodes + 2);
+    // events: +1 at the young end and -1 at the old end of every branch of positive length; the events of one node are summed first
+    // (each node is one time), so only the node ages are sorted. The arrays are the same as from sorting all branch ends.
+    evW.assign(nNodes + 1, 0.0); evHas.assign(nNodes + 1, 0);
     for (int v = 0; v < nNodes; v++) {
-        double lo_ = age[v], hi_;
-        if (v == root) { if (!useOrigin) continue; hi_ = origin; } else hi_ = age[par[v]];
-        if (hi_ > lo_) { ev.push_back({lo_, 1.0}); ev.push_back({hi_, -1.0}); }
+        double lo_ = age[v], hi_; int up;
+        if (v == root) { if (!useOrigin) continue; hi_ = origin; up = nNodes; } else { hi_ = age[par[v]]; up = par[v]; }
+        if (hi_ > lo_) { evW[v] += 1.0; evHas[v] = 1; evW[up] -= 1.0; evHas[up] = 1; }
     }
-    sort(ev.begin(), ev.end());
+    evBuf.clear();
+    for (int v = 0; v < nNodes; v++) if (evHas[v]) evBuf.push_back({age[v], evW[v]});
+    if (evHas[nNodes]) evBuf.push_back({origin, evW[nNodes]});
+    sort(evBuf.begin(), evBuf.end());
     exA.assign(1, 0.0); exC.assign(1, 0.0); exN.assign(1, 0.0);
-    for (auto &e : ev) {
+    for (auto &e : evBuf) {
         if (e.first > exA.back()) { exC.push_back(exC.back() + exN.back() * (e.first - exA.back())); exA.push_back(e.first); exN.push_back(exN.back()); }
         exN.back() += e.second;
     }
@@ -956,8 +1013,7 @@ double Chain::expo(double t) const {
 }
 int Chain::fosBelow(double t) const { return isfinite(t) ? int(lower_bound(foA.begin(), foA.end(), t) - foA.begin()) : (int)foA.size(); }
 double Chain::scoreInt(double a, double b) const {
-    double nn = betaF * (fosBelow(b) - fosBelow(a)), L = betaF * (expo(b) - expo(a));
-    return lgamma(nn + 1.0) - (nn + 1.0) * log(L + 10.0);
+    return scoreCnt(fosBelow(b) - fosBelow(a), expo(b) - expo(a));
 }
 double Chain::lnQpsi(double a, double b, double p) const {
     double sh = betaF * (fosBelow(b) - fosBelow(a)) + 1.0, r = betaF * (expo(b) - expo(a)) + 10.0;
@@ -970,22 +1026,27 @@ double Chain::drawPsi(double a, double b) {
 // piecewise-constant proposal on [lo, hi]: segments bp[j]..bp[j+1] with log weight lw[j] (segment length x guide at its midpoint),
 // mixed 90:10 with the uniform density
 static const double SEG_UNIF = 0.1;
-double Chain::lnSegQ(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double t, double lo, double hi) const {
-    size_t j = upper_bound(bp.begin(), bp.end(), t) - bp.begin(); j = j == 0 ? 0 : j - 1; if (j >= lw.size()) j = lw.size() - 1;
-    return log((1.0 - SEG_UNIF) * exp(lw[j] - lwMax) / lwSum / (bp[j + 1] - bp[j]) + SEG_UNIF / (hi - lo));
+double Chain::lnSegQ(const vector<double> &bp, const vector<double> &ew, double lwSum, double t, double lo, double hi) const {
+    size_t j = upper_bound(bp.begin(), bp.end(), t) - bp.begin(); j = j == 0 ? 0 : j - 1; if (j >= ew.size()) j = ew.size() - 1;
+    return log((1.0 - SEG_UNIF) * ew[j] / lwSum / (bp[j + 1] - bp[j]) + SEG_UNIF / (hi - lo));
 }
-double Chain::drawSeg(const vector<double> &bp, const vector<double> &lw, double lwMax, double lwSum, double lo, double hi) {
+double Chain::drawSeg(const vector<double> &bp, const vector<double> &ew, double lwSum, double lo, double hi) {
     if (rng.u() < SEG_UNIF) return lo + rng.u() * (hi - lo);
     double r = rng.u() * lwSum, c = 0; size_t j = 0;
-    for (; j + 1 < lw.size(); j++) { c += exp(lw[j] - lwMax); if (r < c) break; }
+    for (; j + 1 < ew.size(); j++) { c += ew[j]; if (r < c) break; }
     return bp[j] + rng.u() * (bp[j + 1] - bp[j]);
 }
 // segment breakpoints: every branch end and fossil age strictly inside (lo, hi), plus the extra cut points, plus lo and hi
 static void breakpoints(const vector<double> &exA, const vector<double> &foA, const vector<double> &extra, double lo, double hi, vector<double> &bp) {
-    bp.clear(); bp.push_back(lo); bp.push_back(hi);
-    for (const vector<double> *v : {&exA, &foA}) for (auto it = upper_bound(v->begin(), v->end(), lo); it != v->end() && *it < hi; ++it) bp.push_back(*it);
-    for (double x : extra) if (x > lo && x < hi) bp.push_back(x);
-    sort(bp.begin(), bp.end()); bp.erase(unique(bp.begin(), bp.end()), bp.end());
+    // both arrays are sorted: merge their points strictly inside (lo, hi); same set as sorting all of them
+    auto a0 = upper_bound(exA.begin(), exA.end(), lo), a1 = lower_bound(a0, exA.end(), hi);
+    auto f0 = upper_bound(foA.begin(), foA.end(), lo), f1 = lower_bound(f0, foA.end(), hi);
+    bp.clear(); bp.reserve((a1 - a0) + (f1 - f0) + extra.size() + 2); bp.push_back(lo);
+    merge(a0, a1, f0, f1, back_inserter(bp));
+    bool more = false; for (double x : extra) if (x > lo && x < hi) { bp.push_back(x); more = true; }
+    bp.push_back(hi);
+    if (more) sort(bp.begin(), bp.end());
+    bp.erase(unique(bp.begin(), bp.end()), bp.end());
 }
 
 bool Chain::moveShiftData() {
@@ -1001,11 +1062,20 @@ bool Chain::moveShiftData() {
     buildExposure();
     vector<double> bp; breakpoints(exA, foA, {}, lo, hi, bp);
     vector<double> lw(bp.size() - 1); double lwMax = -INFINITY;
-    for (size_t j = 0; j + 1 < bp.size(); j++) { double mid = 0.5 * (bp[j] + bp[j + 1]); lw[j] = log(bp[j + 1] - bp[j]) + scoreInt(A_, mid) + scoreInt(mid, B_); lwMax = max(lwMax, lw[j]); }
-    double lwSum = 0; for (double x : lw) lwSum += exp(x - lwMax);
-    double oldT = shiftT[k], newT = drawSeg(bp, lw, lwMax, lwSum, lo, hi);
+    {   // segment midpoints increase, so fossil counts and exposures are read by moving pointers (same values as fosBelow and expo)
+        const int fA = fosBelow(A_), fB = fosBelow(B_); const double eA = expo(A_), eB = expo(B_);
+        size_t pf = 0, pe = 0; const size_t nf = foA.size(), ne = exA.size();
+        for (size_t j = 0; j + 1 < bp.size(); j++) {
+            double mid = 0.5 * (bp[j] + bp[j + 1]);
+            while (pf < nf && foA[pf] < mid) pf++;
+            double em; if (mid <= exA[0]) em = 0.0; else { while (pe + 1 < ne && exA[pe + 1] <= mid) pe++; em = exC[pe] + exN[pe] * (mid - exA[pe]); }
+            lw[j] = log(bp[j + 1] - bp[j]) + scoreCnt((int)pf - fA, em - eA) + scoreCnt(fB - (int)pf, eB - em); lwMax = max(lwMax, lw[j]);
+        }
+    }
+    vector<double> ew(lw.size()); double lwSum = 0; for (size_t j = 0; j < lw.size(); j++) { ew[j] = exp(lw[j] - lwMax); lwSum += ew[j]; }
+    double oldT = shiftT[k], newT = drawSeg(bp, ew, lwSum, lo, hi);
     if (!(newT > lo && newT < hi)) return false;
-    double lq = lnSegQ(bp, lw, lwMax, lwSum, oldT, lo, hi) - lnSegQ(bp, lw, lwMax, lwSum, newT, lo, hi), dH = 0;
+    double lq = lnSegQ(bp, ew, lwSum, oldT, lo, hi) - lnSegQ(bp, ew, lwSum, newT, lo, hi), dH = 0;
     bool rp = redrawPsi() && rng.u() < 0.5;
     double o0 = psiV[k], o1 = psiV[k + 1];
     if (rp) {
@@ -1041,11 +1111,11 @@ bool Chain::moveRelocate() {
         double mid = 0.5 * (bp[j] + bp[j + 1]), a, b; bnd(S, intOf(S, mid), a, b);
         lw[j] = log(bp[j + 1] - bp[j]) + scoreInt(a, mid) + scoreInt(mid, b) - scoreInt(a, b); lwMax = max(lwMax, lw[j]);
     }
-    double lwSum = 0; for (double x : lw) lwSum += exp(x - lwMax);
-    double oldT = shiftT[k], newT = drawSeg(bp, lw, lwMax, lwSum, wLo, wHi);
+    vector<double> ew(lw.size()); double lwSum = 0; for (size_t j = 0; j < lw.size(); j++) { ew[j] = exp(lw[j] - lwMax); lwSum += ew[j]; }
+    double oldT = shiftT[k], newT = drawSeg(bp, ew, lwSum, wLo, wHi);
     if (!(newT > wLo && newT < wHi)) return false;
     for (double x : S) if (x == newT) return false;
-    double lq = lnSegQ(bp, lw, lwMax, lwSum, oldT, wLo, wHi) - lnSegQ(bp, lw, lwMax, lwSum, newT, wLo, wHi);
+    double lq = lnSegQ(bp, ew, lwSum, oldT, wLo, wHi) - lnSegQ(bp, ew, lwSum, newT, wLo, wHi);
     int jn = intOf(S, newT);
     vector<double> T2 = S; T2.insert(T2.begin() + jn, newT);
     vector<double> oL = lamV, oM = muV, oP = psiV;
@@ -1128,6 +1198,7 @@ void Chain::setupMoves() {
     if (!opt.fixFbd) { weights[M_LAMBDA] = 3 * nFree(0); weights[M_MU] = 3 * nFree(1); weights[M_PSI] = 3 * nFree(2); weights[M_UPDOWN] = 2 * nUD(); } // per free rate, as for one interval
     if (!opt.fixFbd && nEst > 0) weights[M_SHIFT] = 5.0 * nEst;   // estimated shift times
     if (!opt.fixFbd && nEst > 0 && vary[2]) weights[M_SHIFTD] = 5.0 * nEst;  // data-guided time (and psi) proposal (its guide is the psi part)
+    weights[M_UNIT] = 2.0 * unitCons.size();   // a clade of fossils only, moved as a whole (as regraft_global moves one fossil)
     for (int i = 0; i < N_MOVES; i++) if (opt.noMoves.find(MOVE_NAMES[i]) != string::npos) weights[i] = 0.0;
     // relocation permutes the rates of the intervals, so it needs every rate free (and all times estimated on one window)
     if (!opt.fixFbd && estMode == 2 && nShift >= 2 && weights[M_LAMBDA] > 0 && weights[M_MU] > 0 && weights[M_PSI] > 0 && opt.noMoves.find(MOVE_NAMES[M_RELOC]) == string::npos)
@@ -1309,6 +1380,7 @@ void Chain::saveCheckpoint(const string &path) const {
                 o << "SKYM " << att[M_SHIFTD] << ' ' << acc[M_SHIFTD] << ' ' << att[M_RELOC] << ' ' << acc[M_RELOC] << '\n';
             }
         }
+        if (!unitCons.empty()) o << "UNIT " << att[M_UNIT] << ' ' << acc[M_UNIT] << '\n';
         o << "END\n";
     }
     rename(tmp.c_str(), path.c_str());
@@ -1341,6 +1413,7 @@ void Chain::loadCheckpoint(const string &path) {
             if (e == "SKYM") { in >> att[M_SHIFTD] >> acc[M_SHIFTD] >> att[M_RELOC] >> acc[M_RELOC] >> e; }
         } else if (nEst > 0) die("checkpoint has no estimated shift times");
     } else if (e == "SKY") die("checkpoint was written with rate shifts; give the same rate_shifts");
+    if (e == "UNIT") in >> att[M_UNIT] >> acc[M_UNIT] >> e;
     if (e != "END") die("truncated checkpoint");
     recomputeAll();
 }
@@ -1398,7 +1471,7 @@ void Chain::run() {
                 case M_REGRAFT_L: ok = moveRegraft(true); break; case M_REGRAFT_G: ok = moveRegraft(false); break; case M_COLLEXP: ok = moveCollapseExpand(); break;
                 case M_ROOT: ok = moveRoot(false); break; case M_ROOTC: ok = moveRoot(true); break; case M_ORIGIN: ok = moveOrigin(); break;
                 case M_RATE: ok = moveRate(); break; case M_RATESCALE_JOINT: ok = moveJoint(); break; case M_RATESCALE_ALL: ok = moveVector(); break; case M_MEAN: ok = moveMean(); break; case M_SIGMA: ok = moveSigma(); break;
-                case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break; case M_SHIFTD: ok = moveShiftData(); break; case M_RELOC: ok = moveRelocate(); break;
+                case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break; case M_SHIFTD: ok = moveShiftData(); break; case M_RELOC: ok = moveRelocate(); break; case M_UNIT: ok = moveUnit(); break;
             }
             att[mv]++; if (ok) acc[mv]++;
             tuneHit(mv, ok);
@@ -1421,7 +1494,7 @@ void Chain::run() {
             case M_REGRAFT_L: ok = moveRegraft(true); break; case M_REGRAFT_G: ok = moveRegraft(false); break; case M_COLLEXP: ok = moveCollapseExpand(); break;
             case M_ROOT: ok = moveRoot(false); break; case M_ROOTC: ok = moveRoot(true); break; case M_ORIGIN: ok = moveOrigin(); break;
             case M_RATE: ok = moveRate(); break; case M_RATESCALE_JOINT: ok = moveJoint(); break; case M_RATESCALE_ALL: ok = moveVector(); break; case M_MEAN: ok = moveMean(); break; case M_SIGMA: ok = moveSigma(); break;
-            case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break; case M_SHIFTD: ok = moveShiftData(); break; case M_RELOC: ok = moveRelocate(); break;
+            case M_LAMBDA: ok = moveFBDScale(0); break; case M_MU: ok = moveFBDScale(1); break; case M_PSI: ok = moveFBDScale(2); break; case M_UPDOWN: ok = moveUpDown(); break; case M_SHIFT: ok = moveShift(); break; case M_SHIFTD: ok = moveShiftData(); break; case M_RELOC: ok = moveRelocate(); break; case M_UNIT: ok = moveUnit(); break;
         }
         att[mv]++; if (ok) acc[mv]++;
         if (opt.checkPerStep || (opt.check && it % 1000 == 0)) validate();
@@ -1456,7 +1529,7 @@ bool Chain::step(int mv) {
         case M_REGRAFT_L: return moveRegraft(true); case M_REGRAFT_G: return moveRegraft(false); case M_COLLEXP: return moveCollapseExpand();
         case M_ROOT: return moveRoot(false); case M_ROOTC: return moveRoot(true); case M_ORIGIN: return moveOrigin();
         case M_RATE: return moveRate(); case M_RATESCALE_JOINT: return moveJoint(); case M_RATESCALE_ALL: return moveVector(); case M_MEAN: return moveMean(); case M_SIGMA: return moveSigma();
-        case M_LAMBDA: return moveFBDScale(0); case M_MU: return moveFBDScale(1); case M_PSI: return moveFBDScale(2); case M_UPDOWN: return moveUpDown(); case M_SHIFT: return moveShift(); case M_SHIFTD: return moveShiftData(); case M_RELOC: return moveRelocate();
+        case M_LAMBDA: return moveFBDScale(0); case M_MU: return moveFBDScale(1); case M_PSI: return moveFBDScale(2); case M_UPDOWN: return moveUpDown(); case M_SHIFT: return moveShift(); case M_SHIFTD: return moveShiftData(); case M_RELOC: return moveRelocate(); case M_UNIT: return moveUnit();
     }
     return false;
 }

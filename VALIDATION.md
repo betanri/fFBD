@@ -42,6 +42,7 @@ This file holds the numbers behind the [README Validation section](README.md#val
 | 6. Large trees | 6a | Convergence at 1,185 and 2,424 tips | Phylogram | Passed |
 | | 6b | Crown, stem and daughter-stem rules | Phylogram | Passed |
 | | 6d | Automatic starting tree | Phylogram | Passed: valid on 1,184 species; same answer as a supplied start |
+| | 6e | Clades of fossils only (`regraft_clade`) | No data and simulated phylogram | Passed: simulation-based calibration in 3 settings; the clade moves between branches; same answer from different starts |
 | | 6c | Speed | Phylogram | No slowdown with size |
 
 ## 1. Right probabilities
@@ -590,6 +591,26 @@ Tests (`validation/auto_start_check.txt`):
 |---|---|---|---|
 | A06 | 0.17% | 0.73% | 74.83 vs 74.82 Ma |
 | A12 | 0.29% | 1.12% | 138.60 vs 138.53 Ma |
+
+### 6e. Clades of fossils only (passed)
+
+*Data: no data and simulated phylograms.* A clade constraint may hold fossils only (README, Clades of fossils). The move `regraft_clade` moves such a clade as a whole to another branch of its parent constraint. Results: `validation/fossil_clade_checks.txt`.
+
+- **Why the move is needed.** Without it the fossils stayed together, but the clade never left its starting branch: on the Gobiaria set (24 living species) with a test clade of three fossils inside a 16-species group, the clade sat on the same branch in all 1,001 samples. With the move it visited 16 branches.
+- **Cache check** after every proposal: no error with every clock (5), with estimated shift times (`free:2`), and with heated chains (heat on FBD or on FBD and data). Restart from a checkpoint byte-identical.
+- **Start does not matter.** On `examples/example_fossil_clade.txt` (FOSSIL_1 and FOSSIL_3 form a clade inside the clade of A and B), two runs started with the fossil clade on the stem of A and B and two started with it on branch A (20 million proposals each) agree: stem of A and B 0.905 to 0.911, branch A 0.043 to 0.050, branch B 0.044 to 0.047; root age 19.14 to 19.23.
+- **Simulation-based calibration.** `ffbd_sim` with `FFBD_SIM_FOSSIL_CLADE=1` keeps only trees in which FOSSIL_1 and FOSSIL_3 form a clade of their own (`sbc.py --fossil-clade`). SBC starts each chain at the true tree, so it tests that the moves are correct, not that they mix; the two tests above cover mixing.
+
+| Setting | Replicates | Smallest p (chi-square, KS) | Result |
+|---|---|---|---|
+| Root conditioning, with data | 500 | 0.020, 0.036 | Passed |
+| Root conditioning, no data | 1,000 | 0.025, 0.007 | Passed |
+| Origin conditioning, with data | 500 | 0.018, 0.053 | Passed |
+
+14 quantities each; Bonferroni threshold 0.0036.
+
+- **No fossil clade: same output as before.** 24 settings without estimated shifts are byte-identical to the two previous releases, and 14 settings with estimated shifts, heated chains or stepping-stone are byte-identical to the previous release (this release also makes the shift-time move `shift_data` faster without changing its output). `ffbd_sim` without the option writes the same files.
+- **Automatic starting tree.** `ffbd_convert.py` builds each fossil-only clade (nested ones kept as clades) and hangs it, as one unit, on the stem of the smallest constraint with living species that holds it. Tested on the Gobiaria set with a fossil pair nested in a fossil trio: the start is valid and both clades hold in every sample.
 
 ### 6c. Speed
 
