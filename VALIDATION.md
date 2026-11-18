@@ -2,7 +2,7 @@
 
 This file holds the numbers behind the [README Validation section](README.md#validation), which gives the plain-language questions, approach and references. Tests are numbered the same way in both. "RevBayes" means RevBayes 1.3.2 and "MrBayes" means MrBayes 3.2.7. Result files and figures are in `validation/`; the scripts are in `scripts/`.
 
-**Data labels.** fFBD never reads DNA. Its data are a phylogram: branch lengths of the fixed living-species tree, in substitutions per site, with standard errors.
+**Data labels.** fFBD's data are a phylogram estimated from the DNA: branch lengths of the fixed living-species tree, in substitutions per site, with standard errors from bootstrapping the alignment. The dating works from these numbers, not from the alignment's sites.
 
 - **No data**: fossils and priors only.
 - **Phylogram**: branch lengths and standard errors, estimated from DNA or simulated.
