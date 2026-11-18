@@ -102,7 +102,7 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Input | Notes |
 |---|---|
 | Rooted tree of living species | Fixed topology |
-| Branch lengths and their standard errors | ML branch lengths on the fixed tree from a **partitioned** model, with bootstrap standard errors (see below) |
+| Branch lengths and their standard errors | ML branch lengths on the fixed tree from a **partitioned** model, and how uncertain each one is ([Branch lengths and their standard errors](#branch-lengths-and-their-standard-errors), below) |
 | Fossil list | Name, minimum and maximum age |
 | Clade constraints | Which fossils belong in which clades; a clade may hold fossils only (Clades of fossils, below) |
 | Crown and stem rules (optional) | Where a fossil may sit relative to a crown group: four rules (see below) |
@@ -113,6 +113,43 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Starting tree (optional) | **Built automatically** by `scripts/ffbd_convert.py`. Give your own `initial.nwk` only if you want a particular start |
 
 **Partition the branch lengths.** Fit them by gene and codon position, or with a scheme merged by ModelFinder (IQ-TREE `-p partitions.nex -m MFP+MERGE`). A single model for all sites gets short branches wrong: young nodes come out too old relative to old ones, and their intervals miss the true age more often (test 5f).
+
+### Branch lengths and their standard errors
+
+fFBD never reads the DNA. For each branch of the fixed tree it reads two numbers:
+
+- **The branch length**: how much the DNA changed along that branch, in substitutions per site, estimated once by maximum likelihood on the fixed tree (IQ-TREE or RAxML).
+- **Its standard error (SE)**: how uncertain that length is.
+
+**What the standard error does.** A branch's expected length is its rate times its duration. fFBD treats the measured length as that expected length plus noise of size SE (a normal distribution). A well-measured branch (small SE) holds its dates tightly: dates and rates must reproduce its length almost exactly. A poorly measured branch, typically a short one backed by few substitutions, has a large SE relative to its length, so its dates can stray from it. With the wrong SEs, the program either trusts noisy branches too much or ignores good ones.
+
+There are two ways to get the SEs.
+
+**1. With the alignment: bootstrap replicates.** This is the same resampling that gives bootstrap support values for clades (Felsenstein 1985), used here for a different purpose: to measure how much each branch length would change if the genes had been sampled again.
+
+1. Make a new alignment of the same size by drawing its columns (sites) at random from the original, with replacement. Some columns appear twice or more, others not at all. Repeat to get 100 or more such alignments, called replicates (the tests used 100 to 500).
+2. On each replicate, re-estimate only the branch lengths, on the same fixed tree (IQ-TREE `-te TREE`). The tree itself never changes.
+3. The SE of a branch is the standard deviation of its length across the replicates. A branch whose length barely moves between replicates is well measured; one that moves a lot is not.
+
+`scripts/fish_fast.py` does steps 1 and 3; you run IQ-TREE in between:
+
+```
+python3 scripts/fish_fast.py prep  aln.fasta tree.nwk out/ boot/ 100 1         # writes the 100 replicates, boot/b0001.fa ...
+iqtree2 -s aln.fasta -te out/unrooted.nwk -m GTR+G4 --prefix ML                # ML branch lengths on the fixed tree (use your partition scheme, -p)
+# for each replicate: iqtree2 -s boot/b0001.fa -te out/unrooted.nwk -m GTR+G4 --prefix boot/b0001   (use your partition scheme)
+python3 scripts/fish_fast.py table aln.fasta tree.nwk ML.treefile boot/ out/   # branch lengths and SEs, in the converter's files
+```
+
+No SE is set below 1/L, one substitution over the L sites of the alignment, so that a branch with no changes in any replicate still has some uncertainty.
+
+**2. Without the alignment: the SE rule.** When you have only a phylogram, for example branch lengths from a genome-scale tree pruned to your clade, the SE of a branch of length b is set to sqrt(b / 20,000), and at least 1 / 20,000. This is the spread expected if the branch's substitutions had been counted on 20,000 sites (a Poisson count): longer branches get larger SEs in absolute terms but smaller ones relative to their length.
+
+```
+python3 scripts/fish_fast.py rule tree.nwk out/          # rooted phylogram, lengths in substitutions per site
+python3 scripts/fish_fast.py rule tree.nwk out/ 50000    # optional: another number of sites
+```
+
+On the two test clades, the SE rule and 500 bootstrap replicates of the same genes gave the same dates (test 5a: "How the standard errors were computed makes no difference"). The bootstrap is still the better choice when you have the alignment, because it measures the uncertainty of your own data instead of assuming it.
 
 These go in one text file. `examples/example_input.txt` shows every section: the settings, then `tips`, `initial_tree`, `constraints`, `extant_nodes`, `branches` and `terms`. If your inputs are already in RevBayes-style files, `scripts/ffbd_convert.py` builds this file for you.
 
@@ -466,6 +503,7 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 
 - Barido-Sottani J, Aguirre-Fernández G, Hopkins MJ, Stadler T, Warnock R (2019). Ignoring stratigraphic age uncertainty leads to erroneous estimates of species divergence times under the fossilized birth-death process. *Proceedings of the Royal Society B* 286: 20190685.
 - Cook SR, Gelman A, Rubin DB (2006). Validation of software for Bayesian models using posterior quantiles. *Journal of Computational and Graphical Statistics* 15: 675-692.
+- Felsenstein J (1985). Confidence limits on phylogenies: an approach using the bootstrap. *Evolution* 39: 783-791.
 - Gavryushkina A, Welch D, Stadler T, Drummond AJ (2014). Bayesian inference of sampled ancestor trees for epidemiology and fossil calibration. *PLoS Computational Biology* 10: e1003919.
 - Heath TA, Huelsenbeck JP, Stadler T (2014). The fossilized birth-death process for coherent calibration of divergence-time estimates. *PNAS* 111: E2957-E2966.
 - Höhna S, Landis MJ, Heath TA, et al. (2016). RevBayes: Bayesian phylogenetic inference using graphical models and an interactive model-specification language. *Systematic Biology* 65: 726-736.
