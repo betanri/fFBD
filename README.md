@@ -4,6 +4,16 @@ A fast Bayesian program for dating phylogenies with fossils, using the **fossili
 
 > **Status: research software.** The math and sampling have passed strict tests, and fFBD (given a phylogram) matches full-DNA FBD (given the DNA) on two test clades. See [Validation](#validation) before using results.
 
+## Contents
+
+- [What it does](#what-it-does) · [What is fixed and what is estimated](#what-is-fixed-and-what-is-estimated) · [Install](#install) · [Quick start](#quick-start)
+- [What you need](#what-you-need): [branch lengths and their standard errors](#branch-lengths-and-their-standard-errors) · [the input file](#the-input-file) · [crown and stem rules](#crown-and-stem-rules) · [clades of fossils](#clades-of-fossils) · [node calibrations](#node-calibrations)
+- [Main options](#main-options): [heated chains](#heated-chains)
+- [The model](#the-model): [clock](#the-clock-model-rate-changes-across-branches) · [skyline](#the-skyline-model-rate-changes-through-time)
+- [Choosing the model](#choosing-the-model): [the clock](#choosing-the-clock) · [the rate model](#choosing-the-rate-model)
+- [Validation](#validation): [short answers](#short-answers) · [questions 1 to 6](#1-does-ffbd-compute-the-fbd-probability-correctly) · [what it shows and does not](#what-the-validation-shows-and-what-it-does-not) · [why fFBD may do better](#why-ffbd-may-do-better-than-full-dna-fbd-on-real-data) · [reproducing the tests](#reproducing-the-tests) · [references](#references)
+- [Known limits](#known-limits) · [Citation and license](#citation-and-license)
+
 ## What it does
 
 FBD dating treats fossils as real tips on the tree, instead of turning them into minimum ages on nodes. That uses all the fossils, not just the oldest ones, but standard programs become extremely slow on large trees.
@@ -80,23 +90,6 @@ Each chain takes about 15 seconds and writes:
 
 Always run at least two chains with different `--seed` values and check that they agree. Here the two bear chains agree on node ages to about 1% (the crown of living bears at about 21 Ma).
 
-### Choosing the clock
-
-**Highly recommended before dating: choose the clock by fit.** fFBD has five clock models (`--clock`), and on the same DNA a different clock moved some dates by about 10 million years (test 5b), more than the phylogram shortcut ever does. Fit all five on your own phylogram, then date with the best one.
-
-| Clock | Each branch rate |
-|---|---|
-| `exp` | Exponential around the mean rate |
-| `ln` | Lognormal around the mean rate (uncorrelated) |
-| `gam` | Gamma around the mean rate |
-| `igr` | Gamma whose spread shrinks on longer branches (independent gamma rates, as in MrBayes) |
-| `acln` | Lognormal around the rate of its parent branch (autocorrelated) |
-
-To choose one, estimate the marginal likelihood of each by stepping-stone sampling (`--ss K`, with K+1 powers between posterior and prior), then keep the highest. Step 1 of the quick start shows the commands; on the example this takes a few seconds per clock.
-
-- **Reading the result.** A difference of more than about 5 log units is strong evidence for the better clock. Smaller differences mean the data hardly prefer one clock; report the dates under the top two clocks.
-- **Settings for real trees.** Use many more proposals per power: test 5c uses 64 powers, each with 250 million proposals after 50 million of burn-in. Repeat with a second seed to check that the estimate is stable.
-
 ## What you need
 
 | Input | Notes |
@@ -111,8 +104,6 @@ To choose one, estimate the marginal likelihood of each by stepping-stone sampli
 | Root age prior | `uniform MIN MAX`, `soft MIN MAX SD P` (soft bounds) or `normal MEAN SD` |
 | Clock model | Chosen by fitting the five clocks on your phylogram (highly recommended; [Choosing the clock](#choosing-the-clock)), then set with `--clock` |
 | Starting tree (optional) | **Built automatically** by `scripts/ffbd_convert.py`. Give your own `initial.nwk` only if you want a particular start |
-
-**Partition the branch lengths.** Fit them by gene and codon position, or with a scheme merged by ModelFinder (IQ-TREE `-p partitions.nex -m MFP+MERGE`). A single model for all sites gets short branches wrong: young nodes come out too old relative to old ones, and their intervals miss the true age more often (test 5f).
 
 ### Branch lengths and their standard errors
 
@@ -151,7 +142,11 @@ python3 scripts/fish_fast.py rule tree.nwk out/ 50000    # optional: another num
 
 On the two test clades, the SE rule and 500 bootstrap replicates of the same genes gave the same dates (test 5a: "How the standard errors were computed makes no difference"). The bootstrap is still the better choice when you have the alignment, because it measures the uncertainty of your own data instead of assuming it.
 
-These go in one text file. `examples/example_input.txt` shows every section: the settings, then `tips`, `initial_tree`, `constraints`, `extant_nodes`, `branches` and `terms`. If your inputs are already in RevBayes-style files, `scripts/ffbd_convert.py` builds this file for you.
+**Partition the branch lengths.** Fit them by gene and codon position, or with a scheme merged by ModelFinder (IQ-TREE `-p partitions.nex -m MFP+MERGE`). A single model for all sites gets short branches wrong: young nodes come out too old relative to old ones, and their intervals miss the true age more often (test 5f).
+
+### The input file
+
+All inputs go in one text file. `examples/example_input.txt` shows every section: the settings, then `tips`, `initial_tree`, `constraints`, `extant_nodes`, `branches` and `terms`. If your inputs are already in RevBayes-style files, `scripts/ffbd_convert.py` builds this file for you.
 
 **You do not need a starting tree.** MCMC needs one valid tree to start from: fossils attached, every constraint, crown or stem rule and calibration satisfied. If the input folder has no `initial.nwk`, the converter builds one:
 
@@ -214,6 +209,24 @@ Fossils already date the tree, so most analyses need no calibrations. One case w
 | `--heated K` | Run K heated copies of the chain and log the cold one, for posteriors with several peaks (Heated chains, below) |
 | `--check` | Check internal consistency while running (slow) |
 
+### Heated chains
+
+On a large tree the posterior of estimated shift times can have several separate peaks, and a single chain can stay on one of them. Two chains with different seeds that disagree on the shift times show this. `--heated K` runs K copies of the chain side by side (Metropolis-coupled MCMC). Copy r targets the posterior with the FBD density raised to the power H^(r/(K-1)), H = `--hottest` (default 0.3), so the hotter copies cross between peaks more easily. Every `--swap-every` proposals two neighbouring copies may swap states. Only the cold copy (power 1) is logged, so the output is a sample of the posterior.
+
+| Option | Meaning |
+|---|---|
+| `--heated K` | Number of copies (2 or more) |
+| `--hottest H` | Power of the hottest copy, between 0 and 1 (default 0.3) |
+| `--heat-on fbd\|all` | Heat the FBD density only (default), or the FBD density and the phylogram |
+| `--swap-every N` | Proposals of each copy between swap attempts (default 1000) |
+| `--threads T` | Threads (default one per copy); the output does not depend on it |
+
+- The end of the run prints the swap acceptance between neighbouring copies. If one pair rarely swaps (below about 0.05), the heats are too far apart: add copies or raise `--hottest`. On a tree of thousands of tips the FBD density is very sharp, so neighbouring copies need powers that differ by about 0.01.
+- Copies wait for each other at every swap, and a few moves take much longer than the rest on large trees. Use `--swap-every 10000` or more on trees of thousands of tips: on 1,192 living species with 8 copies and one estimated shift, it halved the run time against 1000.
+- Heated chains also work with `--ss` (the stepping-stone power multiplies the heats) and with `--checkpoint` and `--resume`.
+- A run with K copies does K times the work. Use it when two plain chains disagree, and still run two heated chains with different seeds and check that they agree.
+- Validation: test 2e of VALIDATION.md.
+
 ## The model
 
 - Fossilized birth-death process with sampled ancestors, conditioned on the root age (or the origin). Rates are constant by default, or piecewise-constant between shift times, fixed or estimated (skyline FBD, below). The density matches RevBayes 1.3.2 `dnBDSTP` (with `timeline` when there are shifts) inside `dnConstrainedTopology`.
@@ -259,36 +272,41 @@ rate_shifts 66 201.3
 
 - Three moves change the times. `shift_time` slides one time or redraws it between its neighbours. `shift_data` proposes a time where the fossils and the tree make a change in fossil sampling likely, and can redraw the fossil-sampling rates of the two intervals with it. `shift_relocate` (`free:K`, K of 2 or more) takes one shift out and puts it back anywhere in the window, so a shift can jump over the others. Each move has weight 5 per estimated time. All are exact Metropolis-Hastings moves. The log gets `shift_time[1]`, ... (youngest first).
 - When fossil sampling may change at the shifts, an estimated shift tends to land on a rich fossil bed, where many fossils date to a short interval, rather than on a change in speciation or extinction. With `shift_rates lambda,mu` fossil sampling stays the same in every interval, so the shifts are about speciation and extinction only.
-- Each extra shift adds an interval with three more rates. Choose the number of shifts by marginal likelihood (below), not by adding shifts until the dates stop changing.
+- Each extra shift adds an interval with three more rates. Choose the number of shifts by marginal likelihood ([Choosing the rate model](#choosing-the-rate-model)), not by adding shifts until the dates stop changing.
 - Validation: tests 1c and 2d of VALIDATION.md (exact numerical integration, simulation-based calibration, recovery of the number of shifts).
 
-**Choosing the rate model.** Rate models (no shifts, K estimated shifts, fixed or preset shifts) are compared by the marginal likelihood of the whole model, including the FBD density of the tree and fossils. Use `--ss K --ss-power fbd`: the stepping-stone powers go on the FBD density, while the phylogram stays at full weight. Everything else has the same prior in every rate model, so differences of `stepping_stone` in `PREFIX.ml.tsv` are log Bayes factors between rate models. (The default `--ss-power data` puts the powers on the phylogram; that compares clocks, not rate models.) A difference above 3 log units is strong support, above 5 very strong (Kass and Raftery 1995). Run two replicates of each model; they should agree within about 1 log unit, or the run needs more powers or more proposals per power.
+## Choosing the model
+
+The clock and the rate model are both chosen by marginal likelihood, estimated by stepping-stone sampling (`--ss`) on the phylogram being dated.
+
+### Choosing the clock
+
+**Highly recommended before dating: choose the clock by fit.** fFBD has five clock models (`--clock`), and on the same DNA a different clock moved some dates by about 10 million years (test 5b), more than the phylogram shortcut ever does. Fit all five on your own phylogram, then date with the best one.
+
+| Clock | Each branch rate |
+|---|---|
+| `exp` | Exponential around the mean rate |
+| `ln` | Lognormal around the mean rate (uncorrelated) |
+| `gam` | Gamma around the mean rate |
+| `igr` | Gamma whose spread shrinks on longer branches (independent gamma rates, as in MrBayes) |
+| `acln` | Lognormal around the rate of its parent branch (autocorrelated) |
+
+To choose one, estimate the marginal likelihood of each by stepping-stone sampling (`--ss K`, with K+1 powers between posterior and prior), then keep the highest. Step 1 of the quick start shows the commands; on the example this takes a few seconds per clock.
+
+- **Reading the result.** A difference of more than about 5 log units is strong evidence for the better clock. Smaller differences mean the data hardly prefer one clock; report the dates under the top two clocks.
+- **Settings for real trees.** Use many more proposals per power: test 5c uses 64 powers, each with 250 million proposals after 50 million of burn-in. Repeat with a second seed to check that the estimate is stable.
+
+### Choosing the rate model
+
+Rate models (no shifts, K estimated shifts, fixed or preset shifts) are compared by the marginal likelihood of the whole model, including the FBD density of the tree and fossils. Use `--ss K --ss-power fbd`: the stepping-stone powers go on the FBD density, while the phylogram stays at full weight. Everything else has the same prior in every rate model, so differences of `stepping_stone` in `PREFIX.ml.tsv` are log Bayes factors between rate models. (The default `--ss-power data` puts the powers on the phylogram; that compares clocks, not rate models.) A difference above 3 log units is strong support, above 5 very strong (Kass and Raftery 1995). Run two replicates of each model; they should agree within about 1 log unit, or the run needs more powers or more proposals per power.
 
 ```
 for m in none free:1 free:2 free:3 mass-extinctions; do
-  ffbd run input.txt --prefix ss_${m/:/} --clock gam --burnin 1000000 --rate-shifts $m --ss 100 --ss-power fbd --ss-gens 2000000 --ss-burn 200000 --ss-every 1000
+  ./ffbd run input.txt --prefix ss_${m/:/} --clock gam --burnin 1000000 --rate-shifts $m --ss 100 --ss-power fbd --ss-gens 2000000 --ss-burn 200000 --ss-every 1000
 done
 ```
 
 On large trees the FBD density changes steeply near full power, so they need many more powers and longer runs per power than small ones (several hundred powers on thousands of tips). Check that the replicates agree before comparing models.
-
-### Heated chains
-
-On a large tree the posterior of estimated shift times can have several separate peaks, and a single chain can stay on one of them. Two chains with different seeds that disagree on the shift times show this. `--heated K` runs K copies of the chain side by side (Metropolis-coupled MCMC). Copy r targets the posterior with the FBD density raised to the power H^(r/(K-1)), H = `--hottest` (default 0.3), so the hotter copies cross between peaks more easily. Every `--swap-every` proposals two neighbouring copies may swap states. Only the cold copy (power 1) is logged, so the output is a sample of the posterior.
-
-| Option | Meaning |
-|---|---|
-| `--heated K` | Number of copies (2 or more) |
-| `--hottest H` | Power of the hottest copy, between 0 and 1 (default 0.3) |
-| `--heat-on fbd\|all` | Heat the FBD density only (default), or the FBD density and the phylogram |
-| `--swap-every N` | Proposals of each copy between swap attempts (default 1000) |
-| `--threads T` | Threads (default one per copy); the output does not depend on it |
-
-- The end of the run prints the swap acceptance between neighbouring copies. If one pair rarely swaps (below about 0.05), the heats are too far apart: add copies or raise `--hottest`. On a tree of thousands of tips the FBD density is very sharp, so neighbouring copies need powers that differ by about 0.01.
-- Copies wait for each other at every swap, and a few moves take much longer than the rest on large trees. Use `--swap-every 10000` or more on trees of thousands of tips: on 1,192 living species with 8 copies and one estimated shift, it halved the run time against 1000.
-- Heated chains also work with `--ss` (the stepping-stone power multiplies the heats) and with `--checkpoint` and `--resume`.
-- A run with K copies does K times the work. Use it when two plain chains disagree, and still run two heated chains with different seeds and check that they agree.
-- Validation: test 2e of VALIDATION.md.
 
 ## Validation
 
@@ -478,10 +496,10 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 | Test | Script | Result file |
 |---|---|---|
 | 1 | `density_check.py` | `density_check_A06_A12.txt`, `density_check_bears_catfish.txt` |
-| 2a | `sbc.py` | `sbc_with_data_500reps.txt`, `sbc_prior_only_500reps.txt`, `sbc_origin_mode_500reps.txt` |
-| 2b | `sim_study.py sbc`, `sbc_ranks.py` | `sbc_realistic_500reps.txt`, `sbc_rank_histograms.png` |
 | 1b | `sky_density_check.py`, `sbc_sky.py` | `skyline_checks.txt` |
 | 1c | `est_grid_check.py`, `est_rb_check.py` (fixed shifts only) | `skyline_estimated_checks.txt` |
+| 2a | `sbc.py` | `sbc_with_data_500reps.txt`, `sbc_prior_only_500reps.txt`, `sbc_origin_mode_500reps.txt` |
+| 2b | `sim_study.py sbc`, `sbc_ranks.py` | `sbc_realistic_500reps.txt`, `sbc_rank_histograms.png` |
 | 2c | `analytic_check.py` | `analytic_check.txt` |
 | 2d | `sbc_sky.py --shifts free:K:lo:hi`, `sim_study.py simulate --shifts` | `skyline_estimated_checks.txt`, `shift_moves_heated_checks.txt` |
 | 2e | `sbc_sky.py --ffbd-extra "--heated 3 ..."` | `shift_moves_heated_checks.txt` |
