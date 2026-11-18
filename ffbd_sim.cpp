@@ -12,10 +12,13 @@
 // Estimated shift times (as ffbd --rate-shifts free:K / lo:hi): 5th argument free:K:lo:hi draws K ordered times uniform on [lo, hi];
 // items lo:hi draw one time uniform on each window (plain numbers stay fixed). The times are drawn inside the rejection loop, jointly with
 // the rates, and appended to the truth line (all K times, youngest first).
+// Fossil-only clade (environment FFBD_SIM_FOSSIL_CLADE=1): FOSSIL_1 and FOSSIL_3 must also form a clade of their own (inside {A,B,F1,F3});
+// the input gets the constraint cl_F13. Without it the output is unchanged.
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <map>
 #include <random>
@@ -33,6 +36,7 @@ static const int MAXE = 4, MAXF = 3;
 static double lam, mu, psi_, rho = 0.5;
 static vector<double> shiftT, lamV, muV, psiV; // piecewise-constant rates (shiftT empty: constant rates lam, mu, psi_)
 static bool abortSim;
+static const bool fossilClade = getenv("FFBD_SIM_FOSSIL_CLADE") && atoi(getenv("FFBD_SIM_FOSSIL_CLADE")) == 1;
 
 static int newNode(int kind, double age, int l = -1, int r = -1) { nodes.push_back({l, r, age, kind}); return (int)nodes.size() - 1; }
 static int sim(double t) {
@@ -125,9 +129,11 @@ int main(int argc, char **argv) {
         int emask = 0xF; bool ab = false, cd = false;
         int c1 = (1 << 0) | (1 << 1) | (1 << 4) | (1 << 6); // {A,B,F1,F3}
         int c2 = (1 << 2) | (1 << 3) | (1 << 5);            // {C,D,F2}
-        bool hasC1 = false, hasC2 = false;
-        for (int i = 0; i < nn; i++) { if (nodes[i].kind < 2) continue; if ((mask[i] & emask) == 0b0011) ab = true; if ((mask[i] & emask) == 0b1100) cd = true; if (mask[i] == c1) hasC1 = true; if (mask[i] == c2) hasC2 = true; }
+        int c3 = (1 << 4) | (1 << 6);                       // {F1,F3}, a clade of fossils only (with FFBD_SIM_FOSSIL_CLADE=1)
+        bool hasC1 = false, hasC2 = false, hasC3 = false;
+        for (int i = 0; i < nn; i++) { if (nodes[i].kind < 2) continue; if ((mask[i] & emask) == 0b0011) ab = true; if ((mask[i] & emask) == 0b1100) cd = true; if (mask[i] == c1) hasC1 = true; if (mask[i] == c2) hasC2 = true; if (mask[i] == c3) hasC3 = true; }
         if (!ab || !cd || !hasC1 || (!originMode && !hasC2)) continue;
+        if (fossilClade && !hasC3) continue;
         // ACCEPT. Assign ffbd ids: tips A,B,C,D,F1,F2,F3 = 0..6; internal 7..12
         map<int, int> idOf; vector<int> labelToNode(7);
         for (int i = 0; i < nn; i++) if (nodes[i].kind < 2) labelToNode[tipLab[i]] = i;
@@ -172,7 +178,8 @@ int main(int argc, char **argv) {
         // tips
         for (int l = 0; l < 7; l++) { int v = labelToNode[l]; int p = par[v]; int sa = (nodes[p].kind == 3 && nodes[v].kind == 1 && nodes[p].left == v) ? 1 : 0; fprintf(f, "%d %d -1 -1 %.17g %d\n", l, idOf[p], nodes[v].age, sa); }
         for (int v : internals) { int p = v == rootId ? -1 : par[v]; int pid = p < 0 ? -1 : idOf[p]; fprintf(f, "%d %d %d %d %.17g 0\n", idOf[v], pid, idOf[nodes[v].left], idOf[nodes[v].right], nodes[v].age); }
-        if (originMode) fprintf(f, "constraints 1\ncl_ABF13 4 0 1 4 6\n"); else fprintf(f, "constraints 2\ncl_ABF13 4 0 1 4 6\ncl_CDF2 3 2 3 5\n");
+        if (fossilClade) { if (originMode) fprintf(f, "constraints 2\ncl_ABF13 4 0 1 4 6\ncl_F13 2 4 6\n"); else fprintf(f, "constraints 3\ncl_ABF13 4 0 1 4 6\ncl_CDF2 3 2 3 5\ncl_F13 2 4 6\n"); }
+        else if (originMode) fprintf(f, "constraints 1\ncl_ABF13 4 0 1 4 6\n"); else fprintf(f, "constraints 2\ncl_ABF13 4 0 1 4 6\ncl_CDF2 3 2 3 5\n");
         fprintf(f, "extant_nodes 3\n%d n1\n%d n2\n%d n3\n", idOf[n1], idOf[n2], idOf[n3]);
         fprintf(f, "branches 6\n");
         for (int b = 0; b < 6; b++) fprintf(f, "%d %d %d\n", b, idOf[br[b][0]], br[b][1] < 0 ? -1 : idOf[br[b][1]]);

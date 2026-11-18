@@ -206,7 +206,9 @@ def auto_start():
     Start ages: mean path height of the backbone branch lengths (edge counts if it has none), scaled to the initial root age.
     Each fossil goes on the stem of the smallest constraint that contains it (the node of its living members), at its minimum
     age; fossils on the same stem are stacked from the smallest constraint up. A crown-rule fossil goes inside the crown, on
-    the stem of the crown node's first child. Nodes are then pushed up wherever needed: above their children and fossils,
+    the stem of the crown node's first child. A constraint with fossils only is built as a small clade of its fossils (nested
+    fossil-only constraints kept as clades) and goes, as one unit, on the stem of the smallest constraint with living species
+    that contains it. Nodes are then pushed up wherever needed: above their children and fossils,
     and to the minimum of any node calibration. All checks below then run on this tree as on a supplied one."""
     EPS = 0.01
     bb = parse(rd("backbone.nwk"))
@@ -271,8 +273,35 @@ def auto_start():
             cal_hi[id(x)] = min(cal_hi.get(id(x), float("inf")), float(m.group(2)))
     lad = {id(x): [] for x in order}
     crown_on = {id(x): [] for x in order}
+    iage = {f: taxa[f][0] for f in fossils}             # age of each item hung on a stem (a fossil, or the top of a fossil-only clade)
+    fonly = [frozenset(st_) for _, st_ in cons if not (st_ & exset_)]
+    tops = [G for G in fonly if not any(G < H for H in fonly)]
+    in_unit = set().union(*tops) if tops else set()
+
+    def build(G):                                       # (newick, age) of a clade of the fossils of G; nested fossil-only constraints stay clades
+        subs = [H for H in fonly if H < G and not any(H < K < G for K in fonly)]
+        items = [build(H) for H in subs] + [(f, taxa[f][0]) for f in sorted(G - set().union(*subs) if subs else G)]
+        items.sort(key=lambda t: t[1])
+        cur, ca = items[0]
+        for nwk, na in items[1:]:
+            a2 = max(ca, na) + EPS
+            cur, ca = "(%s:%r,%s:%r)" % (cur, a2 - ca, nwk, a2 - na), a2
+        return cur, ca
+    for G in tops:
+        bad = [f for f in G if f in rules]
+        if bad:
+            sys.exit("auto start: %s has a crown, stem or daughter-stem rule inside a fossil-only constraint; give initial.nwk" % bad[0])
+        homes = [(len(st_), nm) for nm, st_ in cons if G < st_ and st_ & exset_]
+        if not homes:
+            sys.exit("auto start: the fossil-only constraint %s is in no constraint with living species" % sorted(G)[:3])
+        size, nm = min(homes)
+        nwk, ta = build(G)
+        iage[nwk] = ta
+        lad[id(node_of(dict(cons)[nm] & exset_, "constraint " + nm))].append((size, ta, nwk))
     for f in fossils:
-        homes = [(len(st_), nm) for nm, st_ in cons if f in st_]
+        if f in in_unit:
+            continue
+        homes = [(len(st_), nm) for nm, st_ in cons if f in st_ and st_ & exset_]
         if not homes:
             sys.exit("auto start: fossil %s is in no clade constraint (every fossil needs one below the root)" % f)
         size, nm = min(homes)
@@ -319,7 +348,7 @@ def auto_start():
                 parts.append("%s:%r" % (cs, age[id(x)] - ca))
             s_, a = "(" + ",".join(parts) + ")", age[id(x)]
         for a2, f in ladder[id(x)]:
-            s_ = "(%s:%r,%s:%r)" % (s_, a2 - a, f, a2 - taxa[f][0])
+            s_ = "(%s:%r,%s:%r)" % (s_, a2 - a, f, a2 - iage[f])
             a = a2
         return s_, a
     return nw(bb)[0] + ";", age[id(bb)]

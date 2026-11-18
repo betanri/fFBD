@@ -5,6 +5,7 @@
 # 3. The bears example (real data) runs and its root age falls inside the root prior.
 # 4. Estimated shift times (free:2, windows): cache check after every proposal; FBD-power stepping-stone runs.
 # 5. Heated chains (heat on the FBD density, or on FBD and data): cache check of every copy after every proposal; the output does not depend on --threads.
+# 6. A clade of fossils only (examples/example_fossil_clade.txt): cache check after every proposal, every clock.
 set -u
 B=./ffbd; T=$(mktemp -d); fail=0
 [ -x "$B" ] || { echo "build ffbd first (make)"; exit 1; }
@@ -31,5 +32,9 @@ done
 $B run examples/example_input.txt --prefix "$T/t1" --clock gam --seed 17 --gens 50000 --burnin 5000 --rate-shifts free:1 --shift-window 1,16 --heated 4 --swap-every 100 --threads 1 >/dev/null 2>&1
 $B run examples/example_input.txt --prefix "$T/t4" --clock gam --seed 17 --gens 50000 --burnin 5000 --rate-shifts free:1 --shift-window 1,16 --heated 4 --swap-every 100 --threads 4 >/dev/null 2>&1
 if [ -s "$T/t1.log" ] && cmp -s "$T/t1.log" "$T/t4.log"; then echo "ok    heated chains  same output with 1 and 4 threads"; else echo "FAIL  heated chains  output depends on --threads"; fail=1; fi
+for c in exp ln gam igr acln; do
+  out=$($B run examples/example_fossil_clade.txt --prefix "$T/fc" --clock $c --seed 11 --gens 20000 --print 5000 --burnin 5000 --check-every-step 2>&1)
+  if echo "$out" | grep -q "ERROR" || ! echo "$out" | grep -q "FINAL"; then echo "FAIL  fossil clade  clock $c"; fail=1; else echo "ok    fossil clade  clock $c"; fi
+done
 rm -rf "$T"
 [ $fail -eq 0 ] && echo "all tests passed" || { echo "some tests FAILED"; exit 1; }

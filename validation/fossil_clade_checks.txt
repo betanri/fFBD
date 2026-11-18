@@ -1,0 +1,28 @@
+Clades of fossils only (constraint with no living species) and the move regraft_clade: checks
+=============================================================================================
+Scripts: scripts/sbc.py --fossil-clade (ffbd_sim with FFBD_SIM_FOSSIL_CLADE=1), tests/run_tests.sh (test 6).
+
+1. Mixing (Gobiaria set, 24 living species; test clade of 3 fossils with a nested pair inside a 16-species group,
+   400,000 proposals, 1,001 samples): without regraft_clade the fossil clade sat on one branch in all samples;
+   with it, 16 branches were visited. Both fossil clades held in every sample.
+2. Cache check after every proposal (--check-every-step): no error with the clocks exp, ln, gam, igr, acln; with free:2
+   estimated shifts; with heated chains (heat on FBD; on FBD and data). Checkpoint + resume byte-identical.
+3. Start does not matter (examples/example_fossil_clade.txt, 20 million proposals per run, 10% burn-in):
+   start            seed  stem of A+B  branch A  branch B  root age  age n1  sampled ancestors
+   clade on A+B stem  1     0.905       0.050     0.045    19.226    5.673   1.624
+   clade on A+B stem  2     0.911       0.045     0.044    19.140    5.591   1.616
+   clade on branch A  1     0.910       0.043     0.047    19.181    5.634   1.627
+   clade on branch A  2     0.910       0.044     0.047    19.164    5.634   1.621
+4. Simulation-based calibration (FOSSIL_1 and FOSSIL_3 form a clade of their own inside {A, B, FOSSIL_1, FOSSIL_3};
+   14 quantities; chi-square on 20 bins and KS; Bonferroni threshold 0.05/14 = 0.0036). The chain starts at the true
+   tree, so SBC tests that the moves are correct; items 1 and 3 test mixing.
+   setting                         replicates   smallest p (chi2, KS)   result
+   root conditioning, with data      500          0.020, 0.036            passed
+   root conditioning, no data       1000          0.025, 0.007            passed
+   origin conditioning, with data    500          0.018, 0.053            passed
+5. No fossil clade: same output as before. 24 settings (4 examples x default, acln, ln with burn-in, control, fixed
+   shifts 3,9, igr with no data): .log and .trees byte-identical to the two previous releases. 14 settings (2 examples x
+   free:2, windows, free:3, heated with free:1, heated on FBD and data with 2 threads, stepping-stone, FBD-power
+   stepping-stone with free:1): byte-identical to the previous release. ffbd_sim without the option: identical files.
+6. Automatic starting tree (ffbd_convert.py): Gobiaria set with a fossil pair nested in a fossil trio; the start is
+   valid and both clades hold in every sample.
