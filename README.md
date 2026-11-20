@@ -25,6 +25,7 @@ A fast Bayesian program for dating phylogenies with fossils, using the **fossili
     - [Choosing the clock](#choosing-the-clock)
     - [Choosing the rate model](#choosing-the-rate-model)
 - [Validation](#validation)
+    - [Where the likelihood comes from](#where-the-likelihood-comes-from)
     - [Short answers](#short-answers)
     - [Three kinds of data](#three-kinds-of-data)
     - [1. Does fFBD compute the FBD probability correctly?](#1-does-ffbd-compute-the-fbd-probability-correctly)
@@ -340,6 +341,29 @@ All numbers, per-test details and result files are in [VALIDATION.md](VALIDATION
 
 fFBD is new code, and it replaces the DNA with a phylogram. Both need to earn trust. The validation follows the standard recipe for Bayesian software (Cook et al. 2006; Talts et al. 2018; Mendes et al. 2025) and for FBD simulation studies (Heath et al. 2014; Barido-Sottani et al. 2019). It is organized as six questions. For each one: why it matters, how it was tested, and the answer.
 
+### Where the likelihood comes from
+
+fFBD does not call RevBayes, BEAST2 or MrBayes. Its likelihood is a new C++ implementation (`ffbd.cpp`), written with the help of an AI coding assistant (Claude, Anthropic), of published equations:
+
+- **FBD density.** The FBD process with sampled ancestors and a sampling fraction of living species: Stadler (2010, Theorem 1), Gavryushkina et al. (2014) and Heath et al. (2014). The functions E(t) (probability that a lineage leaves no sampled descendant) and D(t) (probability density of the observed subtree along a lineage) use the same closed forms as RevBayes `dnBDSTP` (Höhna et al. 2016). This is the `FBD` structure in `ffbd.cpp`.
+- **Skyline FBD.** Piecewise-constant rates between shift times, with E and D continuous at each shift: Stadler et al. (2013) and Gavryushkina et al. (2014). This is the `SkyFBD` structure.
+- **The rest of the model.** Fossil ages are uniform in their windows. Branch lengths are Normal(rate x time, standard error). The clock priors are standard densities.
+
+**How it was checked.** The math was checked directly, not only by whether final dates agree:
+
+1. **Against an independent implementation, term by term.** On fixed trees and parameter values, each term was compared with RevBayes 1.3.2: tree density, root prior, rate priors, branch-length terms and fossil windows.
+    - Constant rates: 89 states, largest difference 4e-9 (test 1).
+    - Rate shifts: 1,012 states of 4 to 2,772 tips, largest difference 2e-9 (test 1b).
+    - Clock priors: densities match scipy to rounding error (test 5c).
+2. **Against exact answers that do not depend on any program.**
+    - An analytic 3-species prior (test 2c).
+    - Exact numerical integration over estimated shift times (test 1c).
+    - A 50-digit evaluation of the cases where fFBD and RevBayes disagree, when a shift time equals a node age; it agrees with fFBD (test 1b).
+3. **Sampling, by simulation-based calibration.** The data were simulated by a separate program, `ffbd_sim`, on trees of 2 to 8,056 living species, with and without shifts (tests 2a, 2b, 2d, 2e).
+4. **Against MrBayes,** an independent program, on the same prior (test 3a).
+
+**Not yet done:** a line-by-line review of the code against each equation, by someone who did not write it. Exact agreement with RevBayes over more than 1,100 states makes an error in the math unlikely. It cannot rule out an error that fFBD shares with RevBayes's formulation; the exact checks in point 2 rule that out only for the cases they cover.
+
 ### Short answers
 
 | # | Question | Answer |
@@ -557,6 +581,8 @@ Full-DNA FBD is slow, and that forces three compromises in practice. fFBD remove
 - Ronquist F, Teslenko M, van der Mark P, et al. (2012). MrBayes 3.2: efficient Bayesian phylogenetic inference and model choice across a large model space. *Systematic Biology* 61: 539-542.
 - Santaquiteria A, Siqueira AC, Duarte-Ribeiro E, et al. (2021). Phylogenomics and historical biogeography of seahorses, dragonets, goatfishes, and allies (Teleostei: Syngnatharia): assessing factors driving uncertainty in biogeographic inferences. *Systematic Biology* 70: 1145-1162.
 - Santaquiteria A, Miller EC, Rosas-Puchuri U, Pedraza-Marrón CR, Troyer EM, Westneat MW, Carnevale G, Arcila D, Betancur-R R (2025). Colonization dynamics explain the decoupling of species richness and morphological disparity in syngnatharian fishes across oceans. *The American Naturalist* 205(3), doi:10.1086/733931.
+- Stadler T (2010). Sampling-through-time in birth-death trees. *Journal of Theoretical Biology* 267: 396-404.
+- Stadler T, Kühnert D, Bonhoeffer S, Drummond AJ (2013). Birth-death skyline plot reveals temporal changes of epidemic spread in HIV and hepatitis C virus (HCV). *PNAS* 110: 228-233.
 - Talts S, Betancourt M, Simpson D, Vehtari A, Gelman A (2018). Validating Bayesian inference algorithms with simulation-based calibration. arXiv:1804.06788.
 - Xie W, Lewis PO, Fan Y, Kuo L, Chen MH (2011). Improving marginal likelihood estimation for Bayesian phylogenetic model selection. *Systematic Biology* 60: 150-160.
 - Zhang C, Stadler T, Klopfstein S, Heath TA, Ronquist F (2016). Total-evidence dating under the fossilized birth-death process. *Systematic Biology* 65: 228-249.

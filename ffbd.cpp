@@ -96,8 +96,8 @@ struct FBD {
 // Shift ages T[0] < ... < T[K-1] (Myr before present) give K+1 intervals; interval i covers ages [T[i-1], T[i]) with T[-1] = 0,
 // T[K] = infinity, and has its own lambda_i, mu_i, psi_i (i = 0 is the youngest). E (probability that a lineage leaves no sampled
 // descendant) and D (probability density of the observed subtree along a lineage) are continuous at the shifts. Within interval i,
-// E and D/D(T[i-1]) are the constant-rate solutions (FBD::E, FBD::lnD) in time since T[i-1], started from E(T[i-1]) (Stadler 2010 PNAS
-// Theorem 1; Gavryushkina et al. 2014 PLoS Comp Biol; RevBayes dnBDSTP with a timeline). So ln D(t) = C[i] + I[i].lnD(t - T[i-1]),
+// E and D/D(T[i-1]) are the constant-rate solutions (FBD::E, FBD::lnD) in time since T[i-1], started from E(T[i-1]) (Stadler 2010 J Theor
+// Biol Theorem 1; Stadler et al. 2013 PNAS; Gavryushkina et al. 2014 PLoS Comp Biol; RevBayes dnBDSTP with a timeline). So ln D(t) = C[i] + I[i].lnD(t - T[i-1]),
 // with C[i] = ln D(T[i-1]) = sum over j < i of ln q_j(T[j] - T[j-1]); every lineage crossing a shift picks up the q_j factors through C.
 // With K = 0 every function reduces to the constant-rate FBD above, evaluated by the same floating-point operations.
 struct SkyFBD {
