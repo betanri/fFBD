@@ -137,9 +137,12 @@ struct RootPrior {
         if (type == 1) return -0.5 * LN2PI - log(sd) - 0.5 * sq((x - a) / sd);
         if (type == 2) return (x < a || x > b) ? -INFINITY : -log(b - a);
         if (type == 3) {
-            // RevBayes SoftBoundUniformNormalDistribution::computeLnProbability, unchanged (note its log(1 - p/2))
-            if (x < a) return log(1.0 - p / 2.0) + (-0.5 * LN2PI - log(sd) - 0.5 * sq((x - a) / sd));
-            if (x > b) return log(1.0 - p / 2.0) + (-0.5 * LN2PI - log(sd) - 0.5 * sq((x - b) / sd));
+            // Soft-bound uniform: probability p inside [a, b], uniform; 1 - p outside, split equally between two half-normal tails
+            // (sd) beyond the bounds. Each tail has mass (1 - p)/2, so its density is (1 - p) * Normal(x; bound, sd); the whole
+            // density integrates to 1. RevBayes 1.3.2 SoftBoundUniformNormalDistribution uses 1 - p/2 here, which puts mass
+            // 1 - p/2 outside (36% after normalizing, for p = 0.95) and is not normalized; fFBD deliberately differs (audit, 20 Nov 2026).
+            if (x < a) return log(1.0 - p) + (-0.5 * LN2PI - log(sd) - 0.5 * sq((x - a) / sd));
+            if (x > b) return log(1.0 - p) + (-0.5 * LN2PI - log(sd) - 0.5 * sq((x - b) / sd));
             return log(p) - log(b - a);
         }
         return 0.0;
