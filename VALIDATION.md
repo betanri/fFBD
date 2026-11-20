@@ -60,6 +60,11 @@ This file holds the numbers behind the [README Validation section](README.md#val
 
 RevBayes refused to build one bear state, because its origin was below a fossil's window maximum. That is a check at model construction, not a difference in density.
 
+**Soft-bound root prior (changed after the audit).** An independent audit of the code against the published equations (November 2026) found that the soft-bound root prior, copied from RevBayes 1.3.2 `SoftBoundUniformNormalDistribution`, weights the two tails by 1 - p/2 instead of 1 - p. That density does not integrate to 1: for p = 0.95 it puts 36% of the prior outside the bounds after normalizing, instead of 5%. fFBD now uses 1 - p, so its root prior differs from RevBayes by the constant ln((1 - p)/(1 - p/2)) whenever the root lies outside the bounds; it is identical inside the bounds and for normal and uniform priors. Checks:
+- The new density integrates to 1.00003 on a 0.001 Myr grid, with 0.0500 of its mass outside the bounds (p = 0.95, sd 2.5, bounds 420.7-444.9).
+- On a run with soft bounds 30-40 Ma, sd 2 and p 0.9 (example tree, no data, FBD density off), the odds of a root above 40 Ma against inside fall by 5.54 compared with the old code; 1 - p/2 over 1 - p predicts 5.50.
+- `make test` passes.
+
 ### Test 1b. Rate shifts, skyline FBD (passed)
 
 *Data: no data and phylogram.* With `rate_shifts`, lambda, mu and psi are piecewise-constant between fixed times (README, The skyline model). Results: `validation/skyline_checks.txt`; scripts `sky_density_check.py`, `sbc_sky.py`.
