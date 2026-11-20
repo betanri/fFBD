@@ -128,6 +128,9 @@ struct SkyFBD {
 };
 
 static inline double sq(double x) { return x * x; }
+// Support of every branch rate: [1e-100, 1e100]. Every move that changes a rate rejects a proposal outside it, so all moves
+// share one support and each is reversible on it (audit, 20 Nov 2026: moveRate alone checked the bound before).
+static inline bool rateIn(double r) { return r >= 1e-100 && r <= 1e100; }
 
 // ---- root prior ----
 struct RootPrior {
@@ -624,6 +627,7 @@ bool Chain::moveCoupled() {
         int b = nodeBranches[v][i]; newT[i] = branchTime(b);
         if (newT[i] <= 0 || oldT[i] <= 0) { age[v] = oldA; return false; }
         oldR[i] = rates[b]; newR[i] = oldR[i] * oldT[i] / newT[i];
+        if (!rateIn(newR[i])) { age[v] = oldA; return false; }
         hast += log(oldT[i] / newT[i]); if (clk < 2) dP += lnRateP1(newR[i]) - lnRateP1(oldR[i]);
     }
     if (clk >= 2) { for (int i = 0; i < nb; i++) rates[nodeBranches[v][i]] = newR[i]; dP = localRateP(S, nS) - before; for (int i = 0; i < nb; i++) rates[nodeBranches[v][i]] = oldR[i]; }
@@ -830,6 +834,7 @@ bool Chain::moveRoot(bool coupled) {
         age[root] = newA;
         double hast = 0, dP = 0;
         for (int i = 0; i < nb; i++) { int b = nodeBranches[root][i]; nT[i] = branchTime(b); oR[i] = rates[b]; nR[i] = oR[i] * oT[i] / nT[i]; hast += log(oT[i] / nT[i]); if (clk < 2) dP += lnRateP1(nR[i]) - lnRateP1(oR[i]); }
+        for (int i = 0; i < nb; i++) if (!rateIn(nR[i])) { age[root] = oldA; return false; }
         if (clk >= 2) { for (int i = 0; i < nb; i++) rates[nodeBranches[root][i]] = nR[i]; dP = localRateP(S, nS) - before; for (int i = 0; i < nb; i++) rates[nodeBranches[root][i]] = oR[i]; }
         if (log(rng.u()) < betaF * dF + dP0 + dP + hast) {
             lnFBD += dF; lnRoot += dP0; lnRatePrior += dP;
@@ -866,7 +871,7 @@ bool Chain::moveRate() {
     if (K == 0) return false;
     int b = rng.below(K);
     double c = exp(tRate.val * (rng.u() - 0.5)), oldR = rates[b], newR = oldR * c;
-    if (newR < 1e-100 || newR > 1e100) return false;
+    if (!rateIn(newR)) return false;
     double dP = 0, dD = 0;
     array<int, 12> S{}; int nS = 0;
     if (clk >= 2) { nS = rateSet(&b, 1, S); dP = -localRateP(S, nS); } else dP = lnRateP1(newR) - lnRateP1(oldR);
@@ -905,6 +910,7 @@ bool Chain::moveJoint() {
     if (newM < 1e-100 || newM > 1e100) return false;
     vector<double> old = rates;
     for (auto &r : rates) r *= c;
+    for (double r : rates) if (!rateIn(r)) { rates = old; return false; }
     double nP = rateLnPriorGiven(rates, newM, sigma);
     double dP = nP - lnRatePrior, dD = 0; vector<double> nv;
     if (useData) { nv.resize(J); for (int j = 0; j < J; j++) { nv[j] = termLL(j); dD += nv[j] - tll[j]; } }
@@ -920,6 +926,7 @@ bool Chain::moveVector() {
     double c = exp(tVec.val * (rng.u() - 0.5));
     vector<double> old = rates;
     for (auto &r : rates) r *= c;
+    for (double r : rates) if (!rateIn(r)) { rates = old; return false; }
     double nP = rateLnPriorGiven(rates, m, sigma);
     double dP = nP - lnRatePrior, dD = 0; vector<double> nv;
     if (useData) { nv.resize(J); for (int j = 0; j < J; j++) { nv[j] = termLL(j); dD += nv[j] - tll[j]; } }
