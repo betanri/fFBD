@@ -235,6 +235,7 @@ Fossils already date the tree, so most analyses need no calibrations. One case w
 | `--rate-shifts SPEC` | Rate shifts: fixed times, `free:K`, windows `lo:hi`, or `mass-extinctions` (The skyline model, below) |
 | `--heated K` | Run K heated copies of the chain and log the cold one, for posteriors with several peaks (Heated chains, below) |
 | `--check` | Check internal consistency while running (slow) |
+| `--rb-sa-move` | **Testing only; never use for dating.** Imitates the RevBayes sampled-ancestor move `mvCollapseExpandFossilBranch` (validation test 3b). That move is not reversible when fossils have age ranges: it can accept a collapse whose reverse expansion is impossible, so it samples the wrong posterior. The default move is exact |
 
 ### Heated chains
 

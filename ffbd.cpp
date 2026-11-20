@@ -786,6 +786,9 @@ bool Chain::moveUnit() {
     return false;
 }
 
+// --rb-sa-move (testing only, validation test 3b): imitates RevBayes mvCollapseExpandFossilBranch by drawing the expanded parent age
+// above the fossil's window maximum instead of above its current age. That move is NOT reversible: a collapse can be accepted whose
+// reverse expansion is impossible (parent age below the window maximum). Never use it for dating; the default move is exact.
 bool Chain::moveCollapseExpand() {
     if (mF == 0) return false;
     int f = n + rng.below(mF);
@@ -1787,7 +1790,7 @@ static void runHeated(const Options &o) {
 }
 
 static void usage() {
-    cerr << "usage: ffbd run INPUT --prefix P --seed S --gens G [--print N] [--tree-print N] [--checkpoint N] [--burnin N] [--mode fast|control] [--no-data] [--resume] [--check|--check-every-step] [--rb-sa-move] [--log-rates] [--dump FILE --dump-every N]\n"
+    cerr << "usage: ffbd run INPUT --prefix P --seed S --gens G [--print N] [--tree-print N] [--checkpoint N] [--burnin N] [--mode fast|control] [--no-data] [--resume] [--check|--check-every-step] [--rb-sa-move (testing only, not reversible)] [--log-rates] [--dump FILE --dump-every N]\n"
             "       [--clock exp|ln|gam|igr|acln] [--hyper-rate R] [--init-hyper X]\n"
             "       [--rate-shifts T1,T2,...|none] [--shift-rates lambda,mu,psi]   piecewise-constant FBD rates (override input keywords rate_shifts, shift_rates)\n"
             "       [--rate-shifts free:K [--shift-window lo,hi] | lo:hi,lo:hi,... | mass-extinctions]   estimated shift times, or preset ages\n"
